@@ -95,27 +95,14 @@ void app_main(void)
     ledOn(ledSync);
     ledOn(ledMode);
 
-    printf("\r\n\r\n====================\r\n");
-    printf("SYSTEM\t: LPS node firmware (ESP32-S3)\r\n");
-
-    printf("TEST\t: Initialize UWB ... ");
     cfgInit();
     uwbInit();
+    bool uwbOk = uwbTest();
 
-    if (uwbTest()) {
-        printf("[OK]\r\n");
-    } else {
-        printf("[ERROR]: %s\r\n", uwbStrError());
-        printf("TEST\t: UWB self-test failed, halting!\r\n");
-        while (true) {
-            ledBlink(ledRanging, false);
-            ledBlink(ledSync,    false);
-            ledBlink(ledMode,    false);
-            vTaskDelay(pdMS_TO_TICKS(250));
-        }
+    if (!uwbOk) {
+        /* UWB failed — keep blinking, but still fall through to the main loop
+         * so we keep printing the error status periodically. */
     }
-
-    printConfig();
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
@@ -123,14 +110,35 @@ void app_main(void)
     ledOff(ledSync);
     ledOff(ledMode);
 
-    printf("SYSTEM\t: Node started ...\r\n");
+    if (uwbOk) {
+        uwbStart();
+    }
 
-    uwbStart();
+    /* Main loop: LED tick + button + periodic status print.
+     *
+     * USB-Serial/JTAG CDC has no "port opened" signal, so boot messages
+     * printed once at startup are always missed if the monitor isn't already
+     * connected.  Instead, we reprint the full status every STATUS_PERIOD_MS
+     * so it appears shortly after the monitor is opened at any time. */
+#define STATUS_PERIOD_MS 5000
+    TickType_t lastStatus = xTaskGetTickCount() - pdMS_TO_TICKS(STATUS_PERIOD_MS);
 
-    /* Main loop: LED tick + button */
     while (1) {
         ledTick();
         handleButton();
+
+        if ((xTaskGetTickCount() - lastStatus) >= pdMS_TO_TICKS(STATUS_PERIOD_MS)) {
+            lastStatus = xTaskGetTickCount();
+            printf("\r\n====================\r\n");
+            printf("SYSTEM\t: LPS node firmware (ESP32-S3)\r\n");
+            if (uwbOk) {
+                printConfig();
+                printf("SYSTEM\t: Node running\r\n");
+            } else {
+                printf("TEST\t: UWB self-test FAILED: %s\r\n", uwbStrError());
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }

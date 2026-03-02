@@ -52,7 +52,7 @@
 #include <string.h>
 
 #include "uwb.h"
-#include "libdw1000.h"
+#include "libdw3000_shim.h"
 #include "mac.h"
 
 #include "cfg.h"

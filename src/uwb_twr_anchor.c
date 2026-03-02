@@ -37,7 +37,7 @@
 
 #include "lpp.h"
 
-#include "libdw1000.h"
+#include "libdw3000_shim.h"
 
 #include "dwOps.h"
 #include "mac.h"

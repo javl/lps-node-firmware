@@ -15,3 +15,7 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # Enable GPIO ISR service (used for DW1000 IRQ).
 CONFIG_GPIO_ESP32_SUPPORT_SWITCH_SPI_CS=y
 CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+
+# Route printf/esp_log output to the built-in USB Serial/JTAG controller
+# so it appears in the PlatformIO serial monitor (USB CDC port).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

@@ -30,7 +30,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "cfg.h"
-#include <libdw1000.h>
+#include "libdw3000_shim.h"
 
 #define MAX_ANCHORS 6
 

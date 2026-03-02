@@ -29,8 +29,8 @@
 
 #include "uwb.h"
 
-/* DW3000 driver API — included via the libdw3000_shim redirect */
-#include "libdw1000.h"
+/* DW3000 driver API */
+#include "libdw3000_shim.h"
 #include "deca_device_api.h"
 #include "deca_regs.h"
 #include "dwOps.h"

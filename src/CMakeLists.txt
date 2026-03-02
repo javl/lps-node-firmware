@@ -19,14 +19,15 @@ idf_component_register(
         "uwb_tdoa_anchor2.c"
         "uwb_tdoa_anchor3.c"
         "uwb_sniffer.c"
-        # libdw1000 (vendored, included directly)
-        "../lib/libdw1000/src/libdw1000.c"
-        "../lib/libdw1000/src/libdw1000Spi.c"
+        # libdw3000 shim + Qorvo decadriver
+        "../lib/libdw3000/src/libdw3000_shim.c"
+        "../lib/libdw3000/decadriver/deca_device.c"
     INCLUDE_DIRS
         # Project headers
         "../inc"
-        # libdw1000 headers
-        "../lib/libdw1000/inc"
+        # libdw3000 shim + decadriver headers
+        "../lib/libdw3000/inc"
+        "../lib/libdw3000/decadriver"
     REQUIRES
         esp_driver_rmt
 )

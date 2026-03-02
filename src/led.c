@@ -33,7 +33,7 @@
 
 /* Per-channel brightness when "on" (0-255).  80 is comfortably visible
  * indoors without being distracting.                                        */
-#define LED_BRIGHT   80U
+#define LED_BRIGHT   10U
 
 /* RMT clock: 10 MHz -> 100 ns per tick.
  * WS2812B timing (Worldsemi datasheet):

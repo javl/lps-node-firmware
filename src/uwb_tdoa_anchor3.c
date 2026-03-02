@@ -56,7 +56,7 @@ The implementation must handle
 #define M2T(ms) pdMS_TO_TICKS(ms)
 #endif
 #include "uwb.h"
-#include "libdw1000.h"
+#include "libdw3000_shim.h"
 #include "mac.h"
 
 #include "cfg.h"
