@@ -46,6 +46,9 @@ extern uwbAlgorithm_t uwbTdoa2Algorithm;
 extern uwbAlgorithm_t uwbTdoa3Algorithm;
 static uwbAlgorithm_t *algorithm = &dummyAlgorithm;
 
+/* Forward declaration — defined later in this file */
+static void IRAM_ATTR dw_isr_handler(void *arg);
+
 struct {
   uwbAlgorithm_t *algorithm;
   char *name;

@@ -50,6 +50,11 @@ The implementation must handle
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+/* M2T: milliseconds to FreeRTOS ticks (not in ESP-IDF FreeRTOSConfig.h) */
+#ifndef M2T
+#define M2T(ms) pdMS_TO_TICKS(ms)
+#endif
 #include "uwb.h"
 #include "libdw1000.h"
 #include "mac.h"
@@ -512,7 +517,7 @@ static void handleRxPacket(dwDevice_t *dev)
     break;
   case SHORT_LPP:
     if (rxPacket.destAddress[0] == ctx.anchorId) {
-      lppHandleShortPacket(&rxPacket.payload[1], dataLength - MAC802154_HEADER_LENGTH - 1);
+      lppHandleShortPacket((char *)&rxPacket.payload[1], dataLength - MAC802154_HEADER_LENGTH - 1);
     }
     break;
   default:

@@ -224,7 +224,7 @@ static void rxcallback(dwDevice_t *dev) {
     case SHORT_LPP:
     {
       if(curr_tag == rxPacket.sourceAddress[0] && dataLength-MAC802154_HEADER_LENGTH > 1) {
-        lppHandleShortPacket(&rxPacket.payload[1], dataLength-MAC802154_HEADER_LENGTH-1);
+        lppHandleShortPacket((char *)&rxPacket.payload[1], dataLength-MAC802154_HEADER_LENGTH-1);
       }
 
       dwNewReceive(dev);

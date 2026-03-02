@@ -248,7 +248,7 @@ static void handleServicePacket(dwDevice_t *dev)
   dwGetData(dev, (uint8_t*)&servicePacket, dataLength);
 
   if (servicePacket.payload[0] == SHORT_LPP) {
-    lppHandleShortPacket(&servicePacket.payload[1], dataLength - MAC802154_HEADER_LENGTH - 1);
+    lppHandleShortPacket((char *)&servicePacket.payload[1], dataLength - MAC802154_HEADER_LENGTH - 1);
   }
 }
 
