@@ -10,9 +10,9 @@
  * Drives the single onboard WS2812B RGB LED (LOLIN S3 Mini, GPIO47) via the
  * ESP-IDF RMT peripheral.  The three logical LEDs are mapped to RGB channels:
  *
- *   ledRanging -> Red
+ *   ledMode    -> Red
+ *   ledRanging -> Green
  *   ledSync    -> Blue
- *   ledMode    -> Green
  *
  * All three states are composited into one pixel on every state change.
  */
