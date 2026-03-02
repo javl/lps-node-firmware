@@ -78,6 +78,7 @@ void uwbInit();
 bool uwbTest();
 void uwbStart();
 char * uwbStrError();
+char * uwbInitStage();
 struct uwbConfig_s * uwbGetConfig();
 int uwbAlgorithmCount();
 char * uwbAlgorithmName(unsigned int id);

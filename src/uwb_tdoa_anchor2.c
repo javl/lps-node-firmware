@@ -104,7 +104,7 @@ enum slotState_e {
   slotTxDone,
 };
 
-// This context struct contains all the requied global values of the algorithm
+// This context struct contains all the required global values of the algorithm
 static struct ctx_s {
   int anchorId;
   enum state_e state;
@@ -394,7 +394,7 @@ static uint32_t slotStep(dwDevice_t *dev, uwbEvent_t event)
   return MAX_TIMEOUT;
 }
 
-// Initialize/reset the agorithm
+// Initialize/reset the algorithm
 static void tdoa2Init(uwbConfig_t * config, dwDevice_t *dev)
 {
   ctx.anchorId = config->address[0];
@@ -408,10 +408,14 @@ static void tdoa2Init(uwbConfig_t * config, dwDevice_t *dev)
 // Called for each DW radio event
 static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
 {
+  // printf("at tdoa2UwbEvent\r\n");
   if (ctx.state == synchronizedState) {
+    // printf("return slotStep\r\n");
     return slotStep(dev, event);
   } else {
+    // printf("Check anchor id\r\n");
     if (ctx.anchorId == 0) {
+      // printf("We are anchor 0\r\n");
       dwGetSystemTimestamp(dev, &ctx.tdmaFrameStart);
       ctx.tdmaFrameStart.full = TDMA_LAST_FRAME(ctx.tdmaFrameStart.full) + 2*TDMA_FRAME_LEN;
       ctx.state = synchronizedState;
@@ -420,8 +424,10 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
       ctx.slotState = slotTxDone;
       updateSlot();
     } else {
+      // printf("We are NOT anchor 0\r\n");
       switch (event) {
         case eventPacketReceived: {
+            // printf("received something\r\n");
             static packet_t rxPacket;
             dwTime_t rxTime = { .full = 0 };
             dwGetReceiveTimestamp(dev, &rxTime);
@@ -444,6 +450,7 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
               updateSlot();
             } else {
               // Start the receiver waiting for a packet from anchor 0
+              // printf("start waiting for packet from anchor 0\r\n");
               dwIdle(dev);
               dwSetReceiveWaitTimeout(dev, RECEIVE_TIMEOUT);
               dwWriteSystemConfigurationRegister(dev);
@@ -456,6 +463,7 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
           break;
         default:
           // Start the receiver waiting for a packet from anchor 0
+          // printf("we are waiting for packet from anchor 0\r\n");
           dwIdle(dev);
           dwSetReceiveWaitTimeout(dev, RECEIVE_TIMEOUT);
           dwWriteSystemConfigurationRegister(dev);

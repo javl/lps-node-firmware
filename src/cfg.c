@@ -33,6 +33,9 @@
  * Required build flags (set per-environment in platformio.ini):
  *   NODE_ADDRESS       0-255
  *   NODE_MODE          MODE_ANCHOR / MODE_TAG / …
+ *   NODE_ANCHOR_X      X coordinate of the anchor
+ *   NODE_ANCHOR_Y      Y coordinate of the anchor
+ *   NODE_ANCHOR_Z      Z coordinate of the anchor
  *   UWB_SMART_POWER    0 or 1
  *   UWB_FORCE_TX_POWER 0 or 1
  *   UWB_TX_POWER       32-bit hex
@@ -52,7 +55,7 @@
 #ifndef ANCHOR_LIST_SIZE
 #  define ANCHOR_LIST_SIZE 6
 #endif
-static const uint8_t default_anchor_list[ANCHOR_LIST_SIZE] = {0, 1, 2, 3, 4, 5};
+static const uint8_t default_anchor_list[ANCHOR_LIST_SIZE] = {0, 1, 2};
 
 /* ---- tiny in-memory key-value store ------------------------------------- */
 #define MAX_CFG_ENTRIES 16
@@ -91,11 +94,22 @@ static CfgEntry *getOrCreate(ConfigField field)
 }
 
 /* ---- public API --------------------------------------------------------- */
+// Add fallback to prevent issues building
+#ifndef NODE_ANCHOR_X
+#  define NODE_ANCHOR_X 0
+#endif
+#ifndef NODE_ANCHOR_Y
+#  define NODE_ANCHOR_Y 0
+#endif
+#ifndef NODE_ANCHOR_Z
+#  define NODE_ANCHOR_Z 0
+#endif
 
 void cfgInit(void)
 {
     cfgWriteU8(cfgAddress,      (uint8_t)NODE_ADDRESS);
     cfgWriteU8(cfgMode,         (uint8_t)NODE_MODE);
+    cfgWriteFP32list(cfgAnchorPos, (float[]){NODE_ANCHOR_X, NODE_ANCHOR_Y, NODE_ANCHOR_Z}, 3);
     cfgWriteU8(cfgSmartPower,   (uint8_t)UWB_SMART_POWER);
     cfgWriteU8(cfgForceTxPower, (uint8_t)UWB_FORCE_TX_POWER);
     cfgWriteU32(cfgTxPower,     (uint32_t)UWB_TX_POWER);
@@ -106,9 +120,9 @@ void cfgInit(void)
                    ANCHOR_LIST_SIZE);
 
     printf("CONFIG\t: Loaded from build flags — "
-           "addr=0x%02X mode=%d smart=%d lowBR=%d longPre=%d\r\n",
-           NODE_ADDRESS, NODE_MODE, UWB_SMART_POWER,
-           UWB_LOW_BITRATE, UWB_LONG_PREAMBLE);
+           "addr=0x%02X mode=%d x=%f y=%f z=%f smart=%d lowBR=%d longPre=%d\r\n",
+           NODE_ADDRESS, NODE_MODE, NODE_ANCHOR_X, NODE_ANCHOR_Y, NODE_ANCHOR_Z,
+           UWB_SMART_POWER, UWB_LOW_BITRATE, UWB_LONG_PREAMBLE);
 }
 
 bool cfgReset(void)

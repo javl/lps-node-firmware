@@ -72,6 +72,7 @@ struct {
 // Low level radio handling context (to be separated)
 static bool isInit = false;
 static int uwbErrorCode = 0;
+static const char *uwbInitFailStage = "uwbInit() not yet called";
 static SemaphoreHandle_t irqSemaphore;
 static dwDevice_t dwm_device;
 static dwDevice_t *dwm = &dwm_device;
@@ -132,12 +133,42 @@ void uwbInit()
   gpio_set_direction(PIN_DW_RST, GPIO_MODE_INPUT);   /* release → high-Z */
   vTaskDelay(pdMS_TO_TICKS(5));                       /* PLL lock margin  */
 
+  /* ---- 2b. SPI sanity check: verify DEV_ID before doing anything ------
+   * This mirrors the checkForDevID() pattern used in DWM3000.cpp.
+   * If SPI wiring is broken or the wrong pins are configured every read
+   * returns 0x00000000 or 0xFFFFFFFF; dwt_checkidlerc() would then spin
+   * for the full 500 ms before failing with a misleading "IDLE_RC" error.
+   * Checking DEV_ID here gives an immediate, actionable diagnostic.
+   *
+   * All known production DW3000 silicon:
+   *   C0 non-PDOA  0xDECA0302
+   *   C0 PDOA      0xDECA0312
+   *   B0 non-PDOA  0xDECA0301   B0 PDOA  0xDECA0311
+   *   A0 non-PDOA  0xDECA0300   A0 PDOA  0xDECA0310
+   */
+  {
+    uint32_t dev_id = dwt_readdevid();
+    int id_ok = (dev_id == DWT_C0_DEV_ID)      || (dev_id == DWT_C0_PDOA_DEV_ID) ||
+                (dev_id == DWT_B0_DEV_ID)      || (dev_id == DWT_B0_PDOA_DEV_ID) ||
+                (dev_id == DWT_A0_DEV_ID)      || (dev_id == DWT_A0_PDOA_DEV_ID);
+    if (!id_ok) {
+      printf("UWB\t: DEV_ID mismatch -- SPI failure or wrong pins? "
+             "Read 0x%08lX, expected 0xDECA03xx\r\n", (unsigned long)dev_id);
+      uwbInitFailStage = "DEV_ID mismatch (SPI wiring problem?)";
+      uwbErrorCode = DWT_ERROR;
+      return;
+    }
+    printf("UWB\t: DEV_ID OK (0x%08lX)\r\n", (unsigned long)dev_id);
+  }
+
   /* ---- 3. Wait for DW3000 to reach IDLE_RC state --------------------- */
   int idleWait = 0;
   while (!dwt_checkidlerc()) {
     vTaskDelay(1);
     if (++idleWait > 500) {
       printf("UWB\t: DW3000 did not reach IDLE_RC within 500 ms\r\n");
+      uwbInitFailStage = "IDLE_RC timeout (chip not responding after reset)";
+      uwbErrorCode = DWT_ERROR;
       return;
     }
   }
@@ -148,6 +179,7 @@ void uwbInit()
   uwbErrorCode = dwt_initialise(DWT_DW_INIT);
   if (uwbErrorCode != DWT_SUCCESS) {
     printf("UWB\t: dwt_initialise failed (%d)\r\n", uwbErrorCode);
+    uwbInitFailStage = "dwt_initialise() failed (OTP/LDO/XTAL calibration error)";
     return;
   }
 
@@ -200,6 +232,7 @@ void uwbInit()
 
   if (dwt_configure(&dw3000_cfg) != DWT_SUCCESS) {
     printf("UWB\t: dwt_configure failed — PLL or RX calibration error\r\n");
+    uwbInitFailStage = "dwt_configure() failed (PLL or RX calibration error)";
     uwbErrorCode = DWT_ERROR;
     return;
   }
@@ -294,6 +327,7 @@ void uwbInit()
   }
 
   isInit = true;
+  uwbInitFailStage = NULL;   /* success — no failure */
 }
 
 bool uwbTest()
@@ -364,6 +398,11 @@ void uwbStart()
 char * uwbStrError()
 {
   return dwStrError(uwbErrorCode);
+}
+
+char * uwbInitStage()
+{
+  return (char *)(uwbInitFailStage ? uwbInitFailStage : "(none)");
 }
 
 struct uwbConfig_s * uwbGetConfig()
