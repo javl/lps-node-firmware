@@ -58,7 +58,7 @@
 #include "cfg.h"
 #include "lpp.h"
 
-#define DEBUG_USING_LED 1
+#define DEBUG_USING_LED 0
 
 #if DEBUG_USING_LED
 #include "led.h"
@@ -69,7 +69,7 @@
 // Still using modulo 2 calculation for slots
 // TODO: If A0 is the TDMA master it could transmit slots parameters and frame
 //       start so that we would not be limited to modulo 2 anymore
-#define NSLOTS 8
+#define NSLOTS 4  // number of anchors, rounded up to next power of 2 (3 anchors -> 4)
 
 #if DEBUG_USING_LED
 #define TDMA_SLOT_BITS 33 // DEBUG: 33 ~262ms/slot; restore to 26 for 2ms/slot
@@ -77,7 +77,9 @@
 #define TDMA_SLOT_BITS 26
 #endif
 
-#define TDMA_NSLOT_BITS 3
+
+// #define TDMA_NSLOT_BITS 3 // when using 8 NSLOTS
+#define TDMA_NSLOT_BITS 2  // must satisfy 2^TDMA_NSLOT_BITS == NSLOTS
 
 #define TDMA_FRAME_BITS (TDMA_SLOT_BITS + TDMA_NSLOT_BITS)
 #define TDMA_SLOT_LEN (1ull<<(TDMA_SLOT_BITS+1))
