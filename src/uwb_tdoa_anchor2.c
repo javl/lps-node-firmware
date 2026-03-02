@@ -58,13 +58,25 @@
 #include "cfg.h"
 #include "lpp.h"
 
+#define DEBUG_USING_LED 1
+
+#if DEBUG_USING_LED
+#include "led.h"
+#endif
+
 #define debug(...) printf(__VA_ARGS__)
 
 // Still using modulo 2 calculation for slots
 // TODO: If A0 is the TDMA master it could transmit slots parameters and frame
 //       start so that we would not be limited to modulo 2 anymore
 #define NSLOTS 8
-#define TDMA_SLOT_BITS 26 // 26: 2ms timeslot
+
+#if DEBUG_USING_LED
+#define TDMA_SLOT_BITS 33 // DEBUG: 33 ~262ms/slot; restore to 26 for 2ms/slot
+#else
+#define TDMA_SLOT_BITS 26
+#endif
+
 #define TDMA_NSLOT_BITS 3
 
 #define TDMA_FRAME_BITS (TDMA_SLOT_BITS + TDMA_NSLOT_BITS)
@@ -319,6 +331,9 @@ static void setTxData(dwDevice_t *dev)
 // Setup the radio to send a packet in the next timeslot
 static void setupTx(dwDevice_t *dev)
 {
+  #if DEBUG_USING_LED
+  ledBlink(ledSync, true);  // DEBUG: oneshot 50ms blue flash on every TX
+  #endif
   ctx.packetIds[ctx.anchorId] = ctx.pid++;
   dwTime_t txTime = transmitTimeForSlot(ctx.nextSlot);
   ctx.txTimestamps[ctx.anchorId] = txTime.low32;
@@ -410,7 +425,6 @@ static void tdoa2Init(uwbConfig_t * config, dwDevice_t *dev)
 // Called for each DW radio event
 static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
 {
-  // printf("at tdoa2UwbEvent\r\n");
   if (ctx.state == synchronizedState) {
     // printf("return slotStep\r\n");
     return slotStep(dev, event);
@@ -429,6 +443,10 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
       // printf("We are NOT anchor 0\r\n");
       switch (event) {
         case eventPacketReceived: {
+          printf("received packet from anchor 0\r\n");
+          #if DEBUG_USING_LED
+            ledBlink(ledRanging, true);  // DEBUG: oneshot 50ms blue flash on every TX
+            #endif
             // printf("received something\r\n");
             static packet_t rxPacket;
             dwTime_t rxTime = { .full = 0 };
