@@ -83,6 +83,8 @@
 
 // Timeout for receiving a packet in a timeslot
 #define RECEIVE_TIMEOUT 300
+// Timeout while scanning for anchor 0 in sync state (0 = wait indefinitely)
+#define RECEIVE_SYNC_TIMEOUT 0
 
 // Timeout for receiving a service packet after we TX ours
 #define RECEIVE_SERVICE_TIMEOUT 800
@@ -452,7 +454,7 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
               // Start the receiver waiting for a packet from anchor 0
               // printf("start waiting for packet from anchor 0\r\n");
               dwIdle(dev);
-              dwSetReceiveWaitTimeout(dev, RECEIVE_TIMEOUT);
+              dwSetReceiveWaitTimeout(dev, RECEIVE_SYNC_TIMEOUT);
               dwWriteSystemConfigurationRegister(dev);
 
               dwNewReceive(dev);
@@ -465,7 +467,7 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
           // Start the receiver waiting for a packet from anchor 0
           // printf("we are waiting for packet from anchor 0\r\n");
           dwIdle(dev);
-          dwSetReceiveWaitTimeout(dev, RECEIVE_TIMEOUT);
+          dwSetReceiveWaitTimeout(dev, RECEIVE_SYNC_TIMEOUT);
           dwWriteSystemConfigurationRegister(dev);
 
           dwNewReceive(dev);
