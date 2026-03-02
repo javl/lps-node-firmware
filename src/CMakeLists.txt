@@ -27,4 +27,6 @@ idf_component_register(
         "../inc"
         # libdw1000 headers
         "../lib/libdw1000/inc"
+    REQUIRES
+        esp_driver_rmt
 )
