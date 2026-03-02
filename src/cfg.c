@@ -22,315 +22,203 @@
  * You should have received a copy of the GNU General Public License
  * along with Foobar.  If not, see <http://www.gnu.org/licenses/>.
  */
-#include <stm32f0xx_hal.h>
+/*
+ * cfg.c — Compile-time node configuration (ESP32-S3 port).
+ *
+ * All settings come from build flags defined in platformio.ini.
+ * cfgWrite* calls update an in-memory store only (no persistence) so
+ * the rest of the code (e.g. LPP anchor-position updates via radio) works
+ * correctly for the lifetime of the current session.
+ *
+ * Required build flags (set per-environment in platformio.ini):
+ *   NODE_ADDRESS       0-255
+ *   NODE_MODE          MODE_ANCHOR / MODE_TAG / …
+ *   UWB_SMART_POWER    0 or 1
+ *   UWB_FORCE_TX_POWER 0 or 1
+ *   UWB_TX_POWER       32-bit hex
+ *   UWB_LOW_BITRATE    0 or 1
+ *   UWB_LONG_PREAMBLE  0 or 1
+ *   ANCHOR_LIST_SIZE   number of anchors in the default list
+ */
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+
 #include "cfg.h"
-#include "eeprom.h"
 #include "uwb.h"
 
-typedef struct {
-  uint8_t *data;
-} TlvArea;
+/* Default anchor list — edit here or change ANCHOR_LIST_SIZE in platformio.ini */
+#ifndef ANCHOR_LIST_SIZE
+#  define ANCHOR_LIST_SIZE 6
+#endif
+static const uint8_t default_anchor_list[ANCHOR_LIST_SIZE] = {0, 1, 2, 3, 4, 5};
 
-// Temporary fix, just buffer the first 100 bytes
-#define NUMBER_OF_BYTES_READ 100
-#define MAGIC ((uint8_t) 0xBC)
-
-#define SIZE_HEADER 5
-#define SIZE_TAIL 1
-
-static uint8_t buffer[NUMBER_OF_BYTES_READ];
-
-static TlvArea tlv;
+/* ---- tiny in-memory key-value store ------------------------------------- */
+#define MAX_CFG_ENTRIES 16
 
 typedef struct {
-  uint8_t magic;
-  uint8_t majorVersion;
-  uint8_t minorVersion;
-  uint16_t tlvSize;
-} __attribute__((packed)) CfgHeader;
+    ConfigField field;
+    uint32_t    u32;
+    uint8_t     raw[sizeof(float) * 3]; /* fits 3-element float position */
+    uint8_t     len;                    /* 0 = scalar, >0 = byte array    */
+    bool        valid;
+} CfgEntry;
 
-static CfgHeader * cfgHeader = (CfgHeader*) buffer;
+static CfgEntry store[MAX_CFG_ENTRIES];
+static int      nStore = 0;
 
-static int tlvFindType(TlvArea *tlv, ConfigField type) {
-  uint16_t pos = 0;
-
-  while (pos < cfgHeader->tlvSize) {
-    if (tlv->data[pos] == type) {
-      return pos;
-    } else {
-      pos += tlv->data[pos+1]+2;
+static CfgEntry *findEntry(ConfigField field)
+{
+    for (int i = 0; i < nStore; i++) {
+        if (store[i].valid && store[i].field == field) return &store[i];
     }
-  }
-  return -1;
+    return NULL;
 }
 
-bool deckTlvHasElement(TlvArea *tlv, ConfigField type) {
-  return tlvFindType(tlv, type) >= 0;
+static CfgEntry *getOrCreate(ConfigField field)
+{
+    CfgEntry *e = findEntry(field);
+    if (e) return e;
+    if (nStore < MAX_CFG_ENTRIES) {
+        e = &store[nStore++];
+        e->field = field;
+        e->valid = true;
+        e->len   = 0;
+        return e;
+    }
+    return NULL; /* store full */
 }
 
-/* Reads all the data from the EEPROM */
-static bool readData(void) {
-  //int i;
-  if (eepromRead(0, buffer, NUMBER_OF_BYTES_READ)) {
-    /*printf("EEPROM: ");
-    for (i = 0; i <NUMBER_OF_BYTES_READ; i++)
-      printf("0x%02X ", buffer[i]);
-    printf("\r\n");*/
-    return true;
-  } else {
-    printf("CONFIG\t: Failed to read data from EEPROM!\r\n");
+/* ---- public API --------------------------------------------------------- */
+
+void cfgInit(void)
+{
+    cfgWriteU8(cfgAddress,      (uint8_t)NODE_ADDRESS);
+    cfgWriteU8(cfgMode,         (uint8_t)NODE_MODE);
+    cfgWriteU8(cfgSmartPower,   (uint8_t)UWB_SMART_POWER);
+    cfgWriteU8(cfgForceTxPower, (uint8_t)UWB_FORCE_TX_POWER);
+    cfgWriteU32(cfgTxPower,     (uint32_t)UWB_TX_POWER);
+    cfgWriteU8(cfgLowBitrate,   (uint8_t)UWB_LOW_BITRATE);
+    cfgWriteU8(cfgLongPreamble, (uint8_t)UWB_LONG_PREAMBLE);
+    cfgWriteU8list(cfgAnchorlist,
+                   (uint8_t *)default_anchor_list,
+                   ANCHOR_LIST_SIZE);
+
+    printf("CONFIG\t: Loaded from build flags — "
+           "addr=0x%02X mode=%d smart=%d lowBR=%d longPre=%d\r\n",
+           NODE_ADDRESS, NODE_MODE, UWB_SMART_POWER,
+           UWB_LOW_BITRATE, UWB_LONG_PREAMBLE);
+}
+
+bool cfgReset(void)
+{
+    printf("CONFIG\t: cfgReset() is a no-op (compile-time configuration)\r\n");
     return false;
-  }
 }
 
-static void write_crc(void) {
-  int i;
-  uint8_t checksum = 0;
-
-  for (i = 0; i < SIZE_HEADER + cfgHeader->tlvSize ; i++) {
-    checksum += buffer[i];
-  }
-  buffer[SIZE_HEADER + cfgHeader->tlvSize] = checksum;
-}
-
-static bool check_crc(void) {
-  int total_len = SIZE_HEADER + SIZE_TAIL + cfgHeader->tlvSize;
-  uint8_t ref_checksum = buffer[total_len - SIZE_TAIL];
-  int i;
-  uint8_t checksum = 0;
-
-  for (i = 0; i < SIZE_HEADER + cfgHeader->tlvSize; i++) {
-    checksum += buffer[i];
-  }
-  if (checksum == ref_checksum) {
-    return true;
-  } else {
-    printf("CONFIG\t: EEPROM configuration checksum not correct (0x%02X vs 0x%02X)!\r\n", ref_checksum, checksum);
-    return false;
-  }
-}
-
-static bool check_magic(void) {
-  return (cfgHeader->magic == MAGIC);
-}
-
-static bool check_content(void) {
-  if (check_magic() && cfgHeader->tlvSize < (NUMBER_OF_BYTES_READ - SIZE_HEADER -SIZE_TAIL)) {
-    return check_crc();
-  }
-  printf("CONFIG\t: EEPROM magic not found!\r\n");
-  return false;
-}
-
-static bool write_defaults(void) {
-  uint8_t default_anchor_list[] = {1, 2, 3, 4, 5, 6};
-
-  buffer[0] = MAGIC;
-  buffer[1] = 1; // Major version
-  buffer[2] = 0; // Minor version
-  buffer[3] = 0; // Length of TLV
-  buffer[4] = 0; // Length of TLV
-  buffer[5] = buffer[0] + buffer[1];
-  // Write the default address
-  cfgWriteU8(cfgAddress, 0);
-  cfgWriteU8(cfgMode, MODE_ANCHOR);
-  cfgWriteU8list(cfgAnchorlist, default_anchor_list, sizeof(default_anchor_list));
-  write_crc();
-  if (!eepromWrite(0, buffer, 7))
-    return false;
-  HAL_Delay(10);
-  if (readData()) {
-    if (check_content()) {
-      return true;
-    } else {
-      return false;
-    }
-  } else {
-    return false;
-  }
-}
-
-void cfgInit(void) {
-  if (readData()) {
-    cfgHeader = (CfgHeader*) buffer;
-    tlv.data = &buffer[SIZE_HEADER];
-    if (check_content()) {
-      printf("CONFIG\t: EEPROM configuration read and verified\r\n");
-    } else {
-      printf("CONFIG\t: Writing default EEPROM configuration\r\n");
-      if (write_defaults()) {
-      } else {
-        printf("CONFIG\t: Error when writing default configuration\r\n");
-      }
-    }
-  } else {
-    printf("CONFIG\t: Could not read data from EEPROM\r\n");
-  }
-}
-
-bool cfgReset(void) {
-  uint8_t data = 0;
-  bool ret = eepromWrite(0, &data, 1);
-  HAL_Delay(10);
-  return ret;
-}
-
-bool cfgReadU8(ConfigField field, uint8_t * value) {
-  int pos = tlvFindType(&tlv, field);
-
-  if (pos > -1) {
-    *value = tlv.data[pos+2];
-  }
-
-  return (pos > -1);
-}
-
-bool cfgWriteU8(ConfigField field, uint8_t value) {
-    int pos = tlvFindType(&tlv, field);
-
-    if (pos > -1) {
-      tlv.data[pos+2] = value;
-    } else {
-      // Add new field at the end of the tlv
-      tlv.data[cfgHeader->tlvSize] = field;
-      tlv.data[cfgHeader->tlvSize+1] = 1;
-      tlv.data[cfgHeader->tlvSize+2] = value;
-      cfgHeader->tlvSize += 3;
-    }
-
-    write_crc();
-    eepromWrite(0, buffer, NUMBER_OF_BYTES_READ);
-    HAL_Delay(10);
-    readData();
+bool cfgFieldSize(ConfigField field, uint8_t *size)
+{
+    CfgEntry *e = findEntry(field);
+    if (!e) return false;
+    *size = (e->len > 0) ? e->len : 1;
     return true;
 }
 
-bool cfgReadU32(ConfigField field, uint32_t * value) {
-  int pos = tlvFindType(&tlv, field);
-
-  if (pos > -1) {
-    memcpy(value, &tlv.data[pos+2], sizeof(uint32_t));
-  }
-
-  return (pos > -1);
-}
-
-bool cfgWriteU32(ConfigField field, uint32_t value) {
-    int pos = tlvFindType(&tlv, field);
-
-    if (pos > -1) {
-      memcpy(&tlv.data[pos+2], &value, sizeof(uint32_t));
-    } else {
-      // Add new field at the end of the tlv
-      tlv.data[cfgHeader->tlvSize] = field;
-      tlv.data[cfgHeader->tlvSize+1] = sizeof(uint32_t);
-      memcpy(&tlv.data[cfgHeader->tlvSize+2], &value, sizeof(uint32_t));
-      cfgHeader->tlvSize += 2 + sizeof(uint32_t);
-    }
-
-    write_crc();
-    eepromWrite(0, buffer, NUMBER_OF_BYTES_READ);
-    HAL_Delay(10);
-    readData();
+bool cfgReadU8(ConfigField field, uint8_t *value)
+{
+    CfgEntry *e = findEntry(field);
+    if (!e) return false;
+    *value = (uint8_t)(e->u32 & 0xFF);
     return true;
 }
 
-bool cfgReadU8list(ConfigField field, uint8_t list[], uint8_t length) {
-  int pos = tlvFindType(&tlv, field);
-
-  if (pos > -1) {
-    memcpy(list, &tlv.data[pos+2], length);
-  }
-
-  return (pos > -1);
-}
-
-bool cfgFieldSize(ConfigField field, uint8_t * size) {
-  int pos = tlvFindType(&tlv, field);
-
-  if (pos > -1) {
-    *size = tlv.data[pos+1];
-  }
-
-  return (pos > -1);
-}
-
-bool cfgWriteU8list(ConfigField field, uint8_t list[], uint8_t length) {
-    int pos = tlvFindType(&tlv, field);
-
-    if (pos > -1) {
-      printf("Witing the list is not supported!!\r\n");
-      //tlv.data[pos+2] = value;
-      // TODO: The list can vary in length, we need to take care of that :-(
-    } else {
-      // Add new field at the end of the tlv
-      tlv.data[cfgHeader->tlvSize] = field;
-      tlv.data[cfgHeader->tlvSize+1] = length;
-      memcpy(&tlv.data[cfgHeader->tlvSize+2], list, length);
-      cfgHeader->tlvSize += 2 + length;
-    }
-
-    write_crc();
-    eepromWrite(0, buffer, NUMBER_OF_BYTES_READ);
-    HAL_Delay(10);
-    readData();
+bool cfgWriteU8(ConfigField field, uint8_t value)
+{
+    CfgEntry *e = getOrCreate(field);
+    if (!e) return false;
+    e->u32 = value;
+    e->len = 0;
     return true;
 }
 
-bool cfgReadFP32listLength(ConfigField field, uint8_t * size) {
-  bool success = cfgFieldSize(field, size);
-  *size /= 4;
-  return success;
+bool cfgReadU32(ConfigField field, uint32_t *value)
+{
+    CfgEntry *e = findEntry(field);
+    if (!e) return false;
+    *value = e->u32;
+    return true;
 }
 
-bool cfgReadFP32list(ConfigField field, float list[], uint8_t length) {
-  int pos = tlvFindType(&tlv, field);
-
-  if (pos > -1) {
-    memcpy(list, &tlv.data[pos+2], length*sizeof(float));
-  }
-
-  return (pos > -1);
+bool cfgWriteU32(ConfigField field, uint32_t value)
+{
+    CfgEntry *e = getOrCreate(field);
+    if (!e) return false;
+    e->u32 = value;
+    e->len = 0;
+    return true;
 }
 
-bool cfgWriteFP32list(ConfigField field, float list[], uint8_t length) {
-    int pos = tlvFindType(&tlv, field);
+bool cfgReadU8list(ConfigField field, uint8_t list[], uint8_t length)
+{
+    CfgEntry *e = findEntry(field);
+    if (!e || e->len == 0) return false;
+    uint8_t n = (length < e->len) ? length : e->len;
+    memcpy(list, e->raw, n);
+    return true;
+}
 
-    if (pos > -1) {
-      uint8_t lengthInMemory=0;
-      cfgReadFP32listLength(field, &lengthInMemory);
-      if (lengthInMemory != length) {
-        printf("Error: cannot write config list with different length\r\n");
-        return false;
-      }
-      memcpy(&tlv.data[pos+2], list, length*sizeof(float));
-    } else {
-      // Add new field at the end of the tlv
-      tlv.data[cfgHeader->tlvSize] = field;
-      tlv.data[cfgHeader->tlvSize+1] = length*sizeof(float);
-      memcpy(&tlv.data[cfgHeader->tlvSize+2], list, length*sizeof(float));
-      cfgHeader->tlvSize += 2 + (length*sizeof(float));
-    }
+bool cfgWriteU8list(ConfigField field, uint8_t list[], uint8_t length)
+{
+    if (length > sizeof(store[0].raw)) return false;
+    CfgEntry *e = getOrCreate(field);
+    if (!e) return false;
+    memcpy(e->raw, list, length);
+    e->len = length;
+    return true;
+}
 
-    write_crc();
-    eepromWrite(0, buffer, NUMBER_OF_BYTES_READ);
-    HAL_Delay(10);
-    readData();
+bool cfgReadFP32listLength(ConfigField field, uint8_t *size)
+{
+    CfgEntry *e = findEntry(field);
+    if (!e || e->len == 0) return false;
+    *size = e->len / sizeof(float);
+    return true;
+}
+
+bool cfgReadFP32list(ConfigField field, float list[], uint8_t length)
+{
+    CfgEntry *e = findEntry(field);
+    if (!e || e->len == 0) return false;
+    uint8_t n = e->len / sizeof(float);
+    if (length < n) n = length;
+    memcpy(list, e->raw, n * sizeof(float));
+    return true;
+}
+
+bool cfgWriteFP32list(ConfigField field, float list[], uint8_t length)
+{
+    size_t bytes = length * sizeof(float);
+    if (bytes > sizeof(store[0].raw)) return false;
+    CfgEntry *e = getOrCreate(field);
+    if (!e) return false;
+    memcpy(e->raw, list, bytes);
+    e->len = (uint8_t)bytes;
     return true;
 }
 
 static bool binaryMode = false;
 
-void cfgSetBinaryMode(bool enable)
-{
-  binaryMode = enable;
-}
+void cfgSetBinaryMode(bool enable) { binaryMode = enable; }
+bool cfgIsBinaryMode(void)         { return binaryMode; }
 
-bool cfgIsBinaryMode()
-{
-  return binaryMode;
-}
+
+
+
+
+
+
+
+
+
+

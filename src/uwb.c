@@ -24,16 +24,17 @@
  */
 /* uwb.c: Uwb radio implementation, low level handling */
 
-#include <stm32f0xx_hal.h>
+#include "driver/gpio.h"
+#include "esp_attr.h"
 
 #include "uwb.h"
 
 #include "libdw1000.h"
 #include "dwOps.h"
 
-#include <FreeRTOS.h>
-#include <semphr.h>
-#include <task.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 // Implemented UWB algoritm. The dummy one is at the end of this file.
 static uwbAlgorithm_t dummyAlgorithm;
@@ -98,6 +99,20 @@ void uwbInit()
 
   dwInit(dwm, &dwOps);       // Init libdw
   dwOpsInit(dwm);
+
+  // Configure DW1000 IRQ pin and register ESP32 ISR
+  {
+    gpio_config_t irq_cfg = {
+      .pin_bit_mask = (1ULL << PIN_DW_IRQ),
+      .mode         = GPIO_MODE_INPUT,
+      .pull_up_en   = GPIO_PULLUP_DISABLE,
+      .pull_down_en = GPIO_PULLDOWN_DISABLE,
+      .intr_type    = GPIO_INTR_POSEDGE,
+    };
+    gpio_config(&irq_cfg);
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(PIN_DW_IRQ, dw_isr_handler, NULL);
+  }
   uwbErrorCode = dwConfigure(dwm); // Configure the dw1000 chip
   if (uwbErrorCode == 0) {
     dwEnableAllLeds(dwm);
@@ -204,9 +219,17 @@ char * uwbAlgorithmName(unsigned int id)
   }
 }
 
+/* ESP32 ISR handler — called on rising edge of PIN_DW_IRQ */
+static void IRAM_ATTR dw_isr_handler(void *arg)
+{
+  BaseType_t higherPriorityTaskWoken = pdFALSE;
+  xSemaphoreGiveFromISR(irqSemaphore, &higherPriorityTaskWoken);
+  portYIELD_FROM_ISR(higherPriorityTaskWoken);
+}
+
 static int checkIrq()
 {
-  return HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_0);
+  return gpio_get_level(PIN_DW_IRQ);
 }
 
 static void uwbTask(void* parameters)
@@ -248,24 +271,7 @@ struct uwbConfig_s * uwbGetConfig()
 }
 
 /**** DWM1000 interrupt handling *****/
-#define DWM_IRQn EXTI0_1_IRQn
-#define DWM_IRQ_PIN GPIO_PIN_0
-
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-  BaseType_t higherPriorityTaskWoken = pdFALSE;
-
-  switch (GPIO_Pin) {
-    case DWM_IRQ_PIN:
-      xSemaphoreGiveFromISR(irqSemaphore, &higherPriorityTaskWoken);
-
-      HAL_NVIC_ClearPendingIRQ(DWM_IRQn);
-      break;
-    default:
-      break;
-  }
-  portYIELD_FROM_ISR(higherPriorityTaskWoken);
-}
+/**** DWM1000 interrupt handling *****/
 
 /* Dummy algorithm (used if UKNOWN algorithm is selected ...)*/
 static void dummyInit(uwbConfig_t * config, dwDevice_t *dev)

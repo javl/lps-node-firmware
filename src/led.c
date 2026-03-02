@@ -22,39 +22,46 @@
  * You should have received a copy of the GNU General Public License
  * along with Foobar.  If not, see <http://www.gnu.org/licenses/>.
  */
-#include <stm32f0xx_hal.h>
-#include <stm32f0xx_hal_gpio.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "led.h"
 
-typedef struct {
-  uint32_t pin;
-  GPIO_TypeDef * port;
-} led_t;
-
-static const led_t leds_revd[] = {
-    [ledRanging] = {.pin = GPIO_PIN_1, .port = GPIOF},
-    [ledSync] = {.pin = GPIO_PIN_1, .port = GPIOA},
-    [ledMode] = {.pin = GPIO_PIN_2, .port = GPIOA}
-};
-
-static const led_t leds_revc[] = {
-    [ledRanging] = {.pin = GPIO_PIN_13, .port = GPIOC},
-    [ledSync] = {.pin = GPIO_PIN_14, .port = GPIOC},
-    [ledMode] = {.pin = GPIO_PIN_15, .port = GPIOC}
+/* LED GPIO pins — defined by build flags PIN_LED_RANGING/SYNC/MODE */
+static const int led_pins[N_LEDS] = {
+    [ledRanging] = PIN_LED_RANGING,
+    [ledSync]    = PIN_LED_SYNC,
+    [ledMode]    = PIN_LED_MODE,
 };
 
 static bool isBlinking[N_LEDS];
 static uint32_t disableTime[N_LEDS];
 
-void ledInit(void) {
-  /* Do nothing */
+void ledInit(void)
+{
+    uint64_t mask = (1ULL << PIN_LED_RANGING) |
+                    (1ULL << PIN_LED_SYNC)    |
+                    (1ULL << PIN_LED_MODE);
+    gpio_config_t cfg = {
+        .pin_bit_mask = mask,
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&cfg);
+    for (int i = 0; i < N_LEDS; i++) {
+        gpio_set_level(led_pins[i], 0);
+    }
 }
 
 static inline void setLed(led_e led, bool value)
 {
-  HAL_GPIO_WritePin(leds_revd[led].port, leds_revd[led].pin, value?GPIO_PIN_SET:GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(leds_revc[led].port, leds_revc[led].pin, value?GPIO_PIN_SET:GPIO_PIN_RESET);
+    gpio_set_level(led_pins[led], value ? 1 : 0);
 }
 
 void ledOn(led_e led) {
@@ -69,33 +76,35 @@ void ledOff(led_e led) {
 
 void ledBlink(led_e led, bool oneshot)
 {
-  isBlinking[led] = true;
-  if (oneshot) {
-    disableTime[led] = HAL_GetTick() + 50;
-    setLed(led, true);
-  }
+    isBlinking[led] = true;
+    if (oneshot) {
+        disableTime[led] = xTaskGetTickCount() * portTICK_PERIOD_MS + 50;
+        setLed(led, true);
+    }
 }
 
-void ledTick()
+void ledTick(void)
 {
-  static uint32_t last_tick;
-  static bool blinkStatus;
+    static uint32_t lastTick;
+    static bool     blinkStatus;
 
-  for (int led=0; led<N_LEDS; led++) {
-    if (isBlinking[led] && disableTime[led] && disableTime[led]<HAL_GetTick()) {
-      setLed(led, false);
-      disableTime[led] = 0;
-      isBlinking[led] = false;
-    }
-  }
+    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-  if (HAL_GetTick()>(last_tick+250)) {
-    blinkStatus = !blinkStatus;
-    last_tick = HAL_GetTick();
-    for (int led=0; led<N_LEDS; led++) {
-      if (isBlinking[led] && !disableTime[led]) {
-        setLed(led, blinkStatus);
-      }
+    for (int led = 0; led < N_LEDS; led++) {
+        if (isBlinking[led] && disableTime[led] && disableTime[led] < now) {
+            setLed(led, false);
+            disableTime[led] = 0;
+            isBlinking[led]  = false;
+        }
     }
-  }
+
+    if (now > (lastTick + 250)) {
+        blinkStatus = !blinkStatus;
+        lastTick    = now;
+        for (int led = 0; led < N_LEDS; led++) {
+            if (isBlinking[led] && !disableTime[led]) {
+                setLed(led, blinkStatus);
+            }
+        }
+    }
 }

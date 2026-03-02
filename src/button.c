@@ -21,59 +21,67 @@
  * License along with this library.
  */
 #include <stdbool.h>
+#include <stdint.h>
 
-#include "gpio.h"
+#include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "button.h"
 
 static ButtonEvent state;
 
 static bool buttonRead(void)
 {
-  return (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET);
+    /* BOOT button is active-low */
+    return (gpio_get_level(PIN_BUTTON) == 0);
 }
 
 void buttonInit(ButtonEvent initialEvent)
 {
-  state = initialEvent;
+    /* Configure button pin as input with pull-up (BOOT button is active-low) */
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << PIN_BUTTON),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&cfg);
+
+    state = initialEvent;
 }
 
-void buttonProcess()
+void buttonProcess(void)
 {
-  static unsigned int lastTick;
-  static unsigned int pressedTick;
-  static bool pressed;
+    static uint32_t lastTick;
+    static uint32_t pressedTick;
+    static bool     pressed;
 
-  if (lastTick != HAL_GetTick())
-  {
-    lastTick = HAL_GetTick();
+    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-    if (pressed == false && buttonRead() == BUTTON_PRESSED)
-    {
-      pressed = true;
-      pressedTick = HAL_GetTick();
+    if (lastTick != now) {
+        lastTick = now;
+
+        if (!pressed && buttonRead() == BUTTON_PRESSED) {
+            pressed     = true;
+            pressedTick = now;
+        } else if (pressed && buttonRead() == BUTTON_RELEASED) {
+            pressed = false;
+            if ((now - pressedTick) < BUTTON_LONGPRESS_TICK) {
+                state = buttonShortPress;
+            } else {
+                state = buttonLongPress;
+            }
+        }
     }
-    else if (pressed == true && buttonRead() == BUTTON_RELEASED)
-    {
-      pressed = false;
-      if ((HAL_GetTick() - pressedTick) < BUTTON_LONGPRESS_TICK)
-      {
-        state = buttonShortPress;
-      }
-      else
-      {
-        state = buttonLongPress;
-      }
-    }
-  }
 }
 
-ButtonEvent buttonGetState()
+ButtonEvent buttonGetState(void)
 {
-  ButtonEvent currentState = state;
-
-  state = buttonIdle;
-
-  return currentState;
+    ButtonEvent current = state;
+    state = buttonIdle;
+    return current;
 }
 
 

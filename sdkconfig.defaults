@@ -1,0 +1,16 @@
+# ESP-IDF sdkconfig defaults for LPS node firmware
+# These are applied before menuconfig overrides.
+
+# 1 kHz tick rate → portTICK_PERIOD_MS = 1, matching the firmware's
+# assumption that timeout values from uwbAlgorithm::onEvent are in ms.
+CONFIG_FREERTOS_HZ=1000
+
+# Run on a single core to simplify task/ISR interaction.
+# Remove this line if you want to use both cores.
+CONFIG_FREERTOS_UNICORE=y
+
+# Give app_main enough stack for the init sequence and the main loop.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Enable GPIO ISR service (used for DW1000 IRQ).
+CONFIG_GPIO_ESP32_SUPPORT_SWITCH_SPI_CS=y

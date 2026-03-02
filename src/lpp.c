@@ -24,14 +24,12 @@
  */
 #include <stdio.h>
 
-#include "stm32f0xx_hal.h"
+#include "esp_system.h"
 
 #include "lpp.h"
 
 #include "cfg.h"
 #include "uwb.h"
-
-#include "bootmode.h"
 
 #define debug(...) // printf(__VA_ARGS__)
 
@@ -74,15 +72,8 @@ void lppHandleShortPacket(char *data, size_t length)
     {
       struct lppShortReboot_s* rebootInfo = (struct lppShortReboot_s*)&data[1];
 
-      // Set boot flags
-      if (rebootInfo->bootMode == LPP_SHORT_REBOOT_TO_BOOTLOADER) {
-        bootmodeSetBootloaderModeFlag();
-      } else if (rebootInfo->bootMode == LPP_SHORT_REBOOT_TO_FIRMWARE) {
-        bootmodeClearBootloaderModeFlag();
-      }
-
-      // Then resets!
-      NVIC_SystemReset();
+      // Reboot
+      esp_restart();
 
       break;
     }
@@ -100,7 +91,7 @@ void lppHandleShortPacket(char *data, size_t length)
       }
 
       // Then resets!
-      NVIC_SystemReset();
+      esp_restart();
 
       break;
     }
@@ -117,7 +108,7 @@ void lppHandleShortPacket(char *data, size_t length)
       cfgWriteU32(cfgTxPower, txPower->txPower);
 
       // Then resets!
-      NVIC_SystemReset();
+      esp_restart();
 
       break;
     }
@@ -132,7 +123,7 @@ void lppHandleShortPacket(char *data, size_t length)
       cfgWriteU8(cfgLongPreamble, mode->enableLongPreamble);
 
       // Then resets!
-      NVIC_SystemReset();
+      esp_restart();
 
       break;
     }

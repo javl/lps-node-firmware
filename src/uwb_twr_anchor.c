@@ -29,6 +29,9 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "cfg.h"
 #include "led.h"
 
@@ -152,7 +155,7 @@ static void rxcallback(dwDevice_t *dev) {
     // Anchor received messages
     case POLL:
       debug("POLL from %02x at %04x\r\n", rxPacket.sourceAddress[0], (unsigned int)arival.low32);
-      rangingTick = HAL_GetTick();
+      rangingTick = xTaskGetTickCount() * portTICK_PERIOD_MS;
       ledBlink(ledRanging, true);
 
       curr_tag = rxPacket.sourceAddress[0];

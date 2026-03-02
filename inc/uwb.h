@@ -70,7 +70,7 @@ typedef struct uwbAlgorithm_s {
   uint32_t (*onEvent)(dwDevice_t *dev, uwbEvent_t event);
 } uwbAlgorithm_t;
 
-#include <FreeRTOS.h>
+#include "freertos/FreeRTOS.h"
 
 #define MAX_TIMEOUT portMAX_DELAY
 
