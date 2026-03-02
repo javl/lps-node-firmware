@@ -22,15 +22,23 @@
  * You should have received a copy of the GNU General Public License
  * along with Foobar.  If not, see <http://www.gnu.org/licenses/>.
  */
-/* uwb.c: Uwb radio implementation, low level handling */
+/* uwb.c: UWB radio implementation — DW3000 (DWM3000 module) low-level handling */
 
 #include "driver/gpio.h"
 #include "esp_attr.h"
 
 #include "uwb.h"
 
+/* DW3000 driver API — included via the libdw3000_shim redirect */
 #include "libdw1000.h"
+#include "deca_device_api.h"
+#include "deca_regs.h"
 #include "dwOps.h"
+
+/* dwOps.c exposes these helpers so we can bracket dwt_initialise() with the
+ * correct SPI speed (DW3000 requires <= 7 MHz during initialise).         */
+extern void dwSpiSetSpeedSlow(void);
+extern void dwSpiSetSpeedFast(void);
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -94,38 +102,145 @@ static void rxfailedcallback(dwDevice_t *dev) {
 }
 
 
+/* -----------------------------------------------------------------------
+ * DW3000 default antenna delay (RX and TX, same value).
+ *
+ * 16436 is the Qorvo reference value for the DWM3000 module at 64 MHz PRF
+ * on Channel 5 (units: DW timestamp ticks, 1 tick ≈ 15.65 ps).
+ *
+ * Calibrate against a known reference distance: increasing this value
+ * increases the reported range by approximately 1 mm per tick.
+ * -----------------------------------------------------------------------*/
+#define DW3000_ANT_DLY 16436U
+
 void uwbInit()
 {
-  // Initializing the low level radio handling
+  /* ---- FreeRTOS semaphore for ISR→task signalling -------------------- */
   static StaticSemaphore_t irqSemaphoreBuffer;
   irqSemaphore = xSemaphoreCreateBinaryStatic(&irqSemaphoreBuffer);
 
-  dwInit(dwm, &dwOps);       // Init libdw
+  /* ---- 1. Hardware init: SPI bus + CS / RST / WAKEUP GPIOs ----------- */
   dwOpsInit(dwm);
 
-  // Configure DW1000 IRQ pin and register ESP32 ISR
-  {
-    gpio_config_t irq_cfg = {
-      .pin_bit_mask = (1ULL << PIN_DW_IRQ),
-      .mode         = GPIO_MODE_INPUT,
-      .pull_up_en   = GPIO_PULLUP_DISABLE,
-      .pull_down_en = GPIO_PULLDOWN_DISABLE,
-      .intr_type    = GPIO_INTR_POSEDGE,
-    };
-    gpio_config(&irq_cfg);
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(PIN_DW_IRQ, dw_isr_handler, NULL);
+  /* ---- 2. Hardware reset per DW3000 datasheet ------------------------
+   * Drive RST low, then release to high-Z so the internal pull-up controls
+   * the line.  Never drive RST high from an output — it can damage the IC.
+   */
+  gpio_set_direction(PIN_DW_RST, GPIO_MODE_OUTPUT);
+  gpio_set_level(PIN_DW_RST, 0);
+  vTaskDelay(pdMS_TO_TICKS(1));
+  gpio_set_direction(PIN_DW_RST, GPIO_MODE_INPUT);   /* release → high-Z */
+  vTaskDelay(pdMS_TO_TICKS(5));                       /* PLL lock margin  */
+
+  /* ---- 3. Wait for DW3000 to reach IDLE_RC state --------------------- */
+  int idleWait = 0;
+  while (!dwt_checkidlerc()) {
+    vTaskDelay(1);
+    if (++idleWait > 500) {
+      printf("UWB\t: DW3000 did not reach IDLE_RC within 500 ms\r\n");
+      return;
+    }
   }
-  uwbErrorCode = dwConfigure(dwm); // Configure the dw1000 chip
-  if (uwbErrorCode == 0) {
-    dwEnableAllLeds(dwm);
-  } else {
+
+  /* ---- 4. Initialise chip (OTP calibration, LDO/bias/XTAL trim) ------
+   * SPI must be <= 7 MHz here; dwOpsInit starts at 2 MHz (slow).
+   */
+  uwbErrorCode = dwt_initialise(DWT_DW_INIT);
+  if (uwbErrorCode != DWT_SUCCESS) {
+    printf("UWB\t: dwt_initialise failed (%d)\r\n", uwbErrorCode);
     return;
   }
-  dwTime_t delay = {.full = 0};
-  dwSetAntenaDelay(dwm, delay);
 
-  // Reading and setting node configuration
+  /* ---- 5. Switch to fast SPI for all subsequent operations ----------- */
+  dwSpiSetSpeedFast();
+
+  /* ---- 6. Read bitrate / preamble preferences from NVS --------------- */
+  uint8_t useLowBitrate = 0;
+  cfgReadU8(cfgLowBitrate, &useLowBitrate);
+#ifdef LPS_LONGER_RANGE
+  useLowBitrate = 1;
+#endif
+  config.lowBitrate = (useLowBitrate == 1);
+
+  uint8_t useLongPreamble = 0;
+  cfgReadU8(cfgLongPreamble, &useLongPreamble);
+  config.longPreamble = (useLongPreamble == 1);
+
+  /* ---- 7. Build DW3000 radio config ----------------------------------
+   * DW3000 supports only channels 5 and 9; channel 2 used by the DW1000
+   * code is not available.  Channel 5 (6.49 GHz) is used here because
+   * the DWM3000 PCB antenna is matched for it.
+   *
+   * 110 kbps (DW1000 low-range mode) does not exist in DW3000; use 850K
+   * as the nearest low-bitrate option.
+   *
+   * Preamble codes 9–12 are valid for channel 5 in DW3000.
+   */
+  dwt_config_t dw3000_cfg = {
+    .chan           = 5,
+    .txPreambLength = config.longPreamble ? DWT_PLEN_1024 : DWT_PLEN_128,
+    .rxPAC          = config.longPreamble ? DWT_PAC32     : DWT_PAC8,
+    .txCode         = 9,
+    .rxCode         = 9,
+    /* DecaWave 8-symbol enhanced SFD (sfdType=1) provides better noise
+     * immunity than the IEEE standard SFD (sfdType=0) at the cost of a
+     * slightly longer preamble.                                         */
+    .sfdType        = 1,
+    .dataRate       = config.lowBitrate ? DWT_BR_850K : DWT_BR_6M8,
+    .phrMode        = DWT_PHRMODE_STD,
+    .phrRate        = DWT_PHRRATE_STD,
+    /* SFD timeout = preamble symbols + 1 + SFD length - PAC size.
+     * For DWT_PLEN_128 / DWT_PAC8:   129 + 1 + 8 - 8  = 130  (≈ 129 used)
+     * For DWT_PLEN_1024 / DWT_PAC32: 1025 + 1 + 8 - 32 = 1002          */
+    .sfdTO          = config.longPreamble ? (1025 + 8 - 32) : (129 + 8 - 8),
+    .stsMode        = DWT_STS_MODE_OFF,   /* no Scrambled Timestamp Seq  */
+    .stsLength      = DWT_STS_LEN_64,     /* irrelevant when STS is off  */
+    .pdoaMode       = DWT_PDOA_M0,        /* no Phase Difference of Arrival */
+  };
+
+  if (dwt_configure(&dw3000_cfg) != DWT_SUCCESS) {
+    printf("UWB\t: dwt_configure failed — PLL or RX calibration error\r\n");
+    uwbErrorCode = DWT_ERROR;
+    return;
+  }
+
+  /* ---- 8. TX spectrum configuration (Channel 5 room-temperature defaults)
+   * PG delay 0x34 and TX power 0xfdfdfdfd match the Qorvo recommended
+   * values for DW3000 channel 5.  Calibrate PGcount via OTP if available.
+   */
+  dwt_txconfig_t dw3000_txcfg = {
+    .PGdly   = 0x34,
+    .power   = 0xfdfdfdfd,
+    .PGcount = 0,            /* 0 = use PGdly directly, no auto-calibration */
+  };
+
+  /* ---- 9. Custom TX power from NVS (overrides the default above) ----- */
+  uint8_t forceTxPower = 0;
+  cfgReadU8(cfgForceTxPower, &forceTxPower);
+  config.forceTxPower = forceTxPower != 0;
+  if (forceTxPower) {
+    uint32_t txPower = 0xfdfdfdfd;
+    cfgReadU32(cfgTxPower, &txPower);
+    config.txPower  = txPower;
+    dw3000_txcfg.power = txPower;
+  }
+  dwt_configuretxrf(&dw3000_txcfg);
+
+  /* Smart TX power is a DW1000-specific feature (automatic power reduction
+   * for short preambles).  DW3000 does not have an equivalent; record the
+   * setting in config for compatibility but do nothing hardware-side.    */
+  uint8_t enableSmartPower = 1;
+  cfgReadU8(cfgSmartPower, &enableSmartPower);
+  config.smartPower = enableSmartPower != 0;
+
+  /* ---- 10. Antenna delay --------------------------------------------- */
+  dwt_setrxantennadelay(DW3000_ANT_DLY);
+  dwt_settxantennadelay(DW3000_ANT_DLY);
+
+  /* ---- 11. Enable on-chip LEDs for debug ----------------------------- */
+  dwt_setleds(DWT_LEDS_ENABLE | DWT_LEDS_INIT_BLINK);
+
+  /* ---- 12. Read node address, mode, anchor list from NVS ------------- */
   cfgReadU8(cfgAddress, &config.address[0]);
   cfgReadU8(cfgMode, &config.mode);
   cfgFieldSize(cfgAnchorlist, &config.anchorListSize);
@@ -141,59 +256,42 @@ void uwbInit()
 
   config.positionEnabled = cfgReadFP32list(cfgAnchorPos, config.position, 3);
 
+  /* ---- 13. Register shim callbacks -----------------------------------
+   * dwInit() stores dwm as the global device pointer and calls
+   * dwt_setcallbacks() with the shim's internal ISR forwarders.
+   * dwAttach*Handler() then stores the application-level callbacks
+   * (txcallback, rxcallback, …) into dwm for forwarding.
+   */
+  dwInit(dwm, NULL);
   dwAttachSentHandler(dwm, txcallback);
   dwAttachReceivedHandler(dwm, rxcallback);
   dwAttachReceiveTimeoutHandler(dwm, rxTimeoutCallback);
   dwAttachReceiveFailedHandler(dwm, rxfailedcallback);
 
-  dwNewConfiguration(dwm);
-  dwSetDefaults(dwm);
+  /* ---- 14. Enable DW3000 interrupt sources ---------------------------- */
+  dwt_setinterrupt(
+      SYS_ENABLE_LO_TXFRS_ENABLE_BIT_MASK  |  /* TX frame sent             */
+      SYS_ENABLE_LO_RXFCG_ENABLE_BIT_MASK  |  /* RX good frame (CRC ok)    */
+      SYS_ENABLE_LO_RXFTO_ENABLE_BIT_MASK  |  /* RX frame timeout          */
+      SYS_ENABLE_LO_RXPTO_ENABLE_BIT_MASK  |  /* RX preamble timeout       */
+      SYS_ENABLE_LO_RXPHE_ENABLE_BIT_MASK  |  /* RX PHY header error       */
+      SYS_ENABLE_LO_RXFCE_ENABLE_BIT_MASK,    /* RX FCS error              */
+      0,                                       /* hi-word mask (unused)     */
+      DWT_ENABLE_INT);
 
-  uint8_t useLowBitrate = 0;
-  cfgReadU8(cfgLowBitrate, &useLowBitrate);
-  #ifdef LPS_LONGER_RANGE
-  useLowBitrate = 1;
-  #endif
-  config.lowBitrate = (useLowBitrate == 1);
-
-  uint8_t useLongPreamble = 0;
-  cfgReadU8(cfgLongPreamble, &useLongPreamble);
-  config.longPreamble = (useLongPreamble == 1);
-
-  const uint8_t* mode = MODE_SHORTDATA_FAST_ACCURACY;
-  if (useLowBitrate && !useLongPreamble) {
-    mode = MODE_SHORTDATA_MID_ACCURACY;
-  } else if (!useLowBitrate && useLongPreamble) {
-    mode = MODE_LONGDATA_FAST_ACCURACY;
-  } else if (useLowBitrate && useLongPreamble) {
-    mode = MODE_LONGDATA_MID_ACCURACY;
+  /* ---- 15. Configure IRQ GPIO and register ESP32 ISR ----------------- */
+  {
+    gpio_config_t irq_cfg = {
+      .pin_bit_mask = (1ULL << PIN_DW_IRQ),
+      .mode         = GPIO_MODE_INPUT,
+      .pull_up_en   = GPIO_PULLUP_DISABLE,
+      .pull_down_en = GPIO_PULLDOWN_DISABLE,
+      .intr_type    = GPIO_INTR_POSEDGE,
+    };
+    gpio_config(&irq_cfg);
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(PIN_DW_IRQ, dw_isr_handler, NULL);
   }
-  dwEnableMode(dwm, mode);
-
-  dwSetChannel(dwm, CHANNEL_2);
-
-  // Enable smart power by default
-  uint8_t enableSmartPower = 1;
-  cfgReadU8(cfgSmartPower, &enableSmartPower);
-  config.smartPower = enableSmartPower != 0;
-  if (enableSmartPower) {
-    dwUseSmartPower(dwm, true);
-  }
-
-  // Do not force power by default
-  uint8_t forceTxPower = 0;
-  cfgReadU8(cfgForceTxPower, &forceTxPower);
-  config.forceTxPower = forceTxPower != 0;
-  if (forceTxPower) {
-    uint32_t txPower = 0x1F1F1F1Ful;
-    cfgReadU32(cfgTxPower, &txPower);
-    config.txPower = txPower;
-    dwSetTxPower(dwm, txPower);
-  }
-
-  dwSetPreambleCode(dwm, PREAMBLE_CODE_64MHZ_9);
-
-  dwCommitConfiguration(dwm);
 
   isInit = true;
 }

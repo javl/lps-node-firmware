@@ -1,0 +1,12 @@
+{
+  "name": "libdw3000",
+  "version": "1.0.0",
+  "description": "DW3000 shim layer and Qorvo decadriver for DWM3000 module",
+  "license": "Apache-2.0",
+  "build": {
+    "srcDir": ".",
+    "includeDir": "inc",
+    "srcFilter": "+<src/*.c> +<decadriver/*.c>",
+    "flags": ["-I decadriver"]
+  }
+}
