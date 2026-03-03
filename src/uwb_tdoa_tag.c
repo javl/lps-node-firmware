@@ -30,6 +30,19 @@
 #include "lpp.h"
 #include "led.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "lwip/err.h"
+#include "lwip/sys.h"
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+
 /* --------------------------------------------------------------------------
  * Compile-time mode switch
  * Default to offload; override with -D TDOA_TAG_OFFLOAD=0 for on-device solve
@@ -138,6 +151,158 @@ static void emit_measurements(void)
 }
 
 #else  /* TDOA_TAG_OFFLOAD == 0 — on-device Chan-Ho 2D solver */
+
+/* --- Wi-Fi & OSC configuration --- */
+#define ESP_WIFI_SSID      "A"
+#define ESP_WIFI_PASS      "B"
+#define ESP_MAXIMUM_RETRY  5
+
+#define OSC_SERVER_IP      "192.168.1.50"
+#define OSC_SERVER_PORT    8889
+
+/* FreeRTOS event group to signal when we are connected*/
+static EventGroupHandle_t s_wifi_event_group;
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT      BIT1
+static const char *TAG_OSC = "OSC";
+static int s_retry_num = 0;
+
+static void event_handler(void* arg, esp_event_base_t event_base,
+                                int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_retry_num < ESP_MAXIMUM_RETRY) {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI(TAG_OSC, "retry to connect to the AP");
+        } else {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        }
+        ESP_LOGI(TAG_OSC,"connect to the AP fail");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG_OSC, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        s_retry_num = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+static void wifi_init_sta(void)
+{
+    // NVS is required for Wi-Fi
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    s_wifi_event_group = xEventGroupCreate();
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &event_handler,
+                                                        NULL,
+                                                        &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &event_handler,
+                                                        NULL,
+                                                        &instance_got_ip));
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = ESP_WIFI_SSID,
+            .password = ESP_WIFI_PASS,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
+    ESP_ERROR_CHECK(esp_wifi_start() );
+
+    ESP_LOGI(TAG_OSC, "wifi_init_sta finished.");
+
+    // Note: We don't block here because it delays startup too much if AP is missing.
+    // The send loop will just fail until connected.
+    // However, for first connect it is better to wait a bit or use xEventGroupWaitBits with timeout.
+    // Given simple use case, we continue.
+}
+
+static int sock = -1;
+static struct sockaddr_in dest_addr;
+
+static void osc_setup_socket(void) {
+    if (sock != -1) return;
+
+    dest_addr.sin_addr.s_addr = inet_addr(OSC_SERVER_IP);
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(OSC_SERVER_PORT);
+
+    sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        ESP_LOGE(TAG_OSC, "Unable to create socket: errno %d", errno);
+        sock = -1;
+        return;
+    }
+    ESP_LOGI(TAG_OSC, "Socket created, sending to %s:%d", OSC_SERVER_IP, OSC_SERVER_PORT);
+}
+
+// Helper to swap float to big endian (network byte order)
+static uint32_t float_to_big_endian(float value) {
+    union {
+        float f;
+        uint32_t i;
+    } u;
+    u.f = value;
+    return htonl(u.i);
+}
+
+static void send_osc_pos(float x, float y) {
+    if (sock < 0) osc_setup_socket();
+    if (sock < 0) return;
+
+    // simplistic OSC packet construction:
+    // Address Pattern: "/pos" -> 4 bytes aligned -> "/pos\0\0\0\0" (8 bytes total)
+    // Type Tag String: ",ff"  -> 4 bytes aligned -> ",ff\0" (4 bytes total)
+    // Arguments: float x (4 bytes), float y (4 bytes)
+    // Total: 8 + 4 + 4 + 4 = 20 bytes
+
+    uint8_t packet[20];
+    memset(packet, 0, sizeof(packet));
+
+    // Address Pattern
+    memcpy(packet, "/pos", 4);
+
+    // Type Tag String
+    memcpy(packet + 8, ",ff", 3);
+
+    // Arguments
+    uint32_t x_be = float_to_big_endian(x);
+    uint32_t y_be = float_to_big_endian(y);
+
+    memcpy(packet + 12, &x_be, 4);
+    memcpy(packet + 16, &y_be, 4);
+
+    int err = sendto(sock, packet, sizeof(packet), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err < 0) {
+        ESP_LOGE(TAG_OSC, "Error occurred during sending: errno %d", errno);
+        close(sock);
+        sock = -1; // Force recreate
+    }
+}
+
 /* DW3000 physical constants */
 /**
  * @brief DW1000 UWB chip clock frequency in Hz
@@ -157,7 +322,7 @@ static void emit_measurements(void)
 #define SPEED_OF_LIGHT 299792458.0 /* metres per second */
 #define DO_CALIBRATE 1
 
-#define PRINT_LOGS 1
+#define PRINT_LOGS 0
 static void emit_measurements(void)
 {
     /* 1. Pre-flight checks */
@@ -286,7 +451,7 @@ static void emit_measurements(void)
     // If noise makes the intersection impossible, "disc" goes negative.
     // We treat it as 0 to find the point where the hyperbolas almost touch.
     if (disc < 0) {
-        printf("POS\tLow confidence (No hard intersection, disc: %.3f)\n", disc);
+        if (PRINT_LOGS) printf("POS\tLow confidence (No hard intersection, disc: %.3f)\n", disc);
         disc = 0;
     }
 
@@ -300,14 +465,15 @@ static void emit_measurements(void)
     if (R0b > 0 && (R0 < 0 || R0b < R0)) R0 = R0b;
 
     if (R0 < 0) {
-        printf("POS\tError: All solutions result in negative distances.\n");
+        if (PRINT_LOGS) printf("POS\tError: All solutions result in negative distances.\n");
         return;
     }
 
     double x_tag = (Px - R0 * Qx) + x0;
     double y_tag = (Py - R0 * Qy) + y0;
+    send_osc_pos((float)x_tag, (float)y_tag);
 
-    printf("POS\t(%.3f, %.3f) | d10: %.2f d20: %.2f R0: %.2f\n", x_tag, y_tag, d10, d20, R0);
+    if (PRINT_LOGS) printf("POS\t(%.3f, %.3f) | d10: %.2f d20: %.2f R0: %.2f\n", x_tag, y_tag, d10, d20, R0);
 }
 
 #endif /* TDOA_TAG_OFFLOAD */
@@ -387,6 +553,14 @@ static uint32_t tdoa2TagOnEvent(dwDevice_t *dev, uwbEvent_t event)
 static void tdoa2TagInit(uwbConfig_t *config, dwDevice_t *dev)
 {
     (void)config;
+
+#if TDOA_TAG_OFFLOAD == 0
+    static bool wifi_started = false;
+    if (!wifi_started) {
+        wifi_init_sta();
+        wifi_started = true;
+    }
+#endif
 
     clear_frame();
     memset(anchor_pos,       0, sizeof(anchor_pos));
