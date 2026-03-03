@@ -48,17 +48,18 @@
 
 /* ------------------------------------------------------------------ */
 
-#if PIN_BUTTON
+#ifdef PIN_BUTTON
 static void handleButton(void)
 {
     ButtonEvent be = buttonGetState();
 
     if (be == buttonShortPress) {
-        #if PIN_LED_WS2812
+
+        #ifdef PIN_LED_WS2812
         ledBlink(ledRanging, true);
         #endif
     } else if (be == buttonLongPress) {
-        #if PIN_LED_WS2812
+        #ifdef PIN_LED_WS2812
         ledBlink(ledSync, true);
         #endif
     }
@@ -67,33 +68,33 @@ static void handleButton(void)
 }
 #endif
 
-static void printConfig(void)
-{
-    struct uwbConfig_s *c = uwbGetConfig();
+// static void printConfig(void)
+// {
+//     struct uwbConfig_s *c = uwbGetConfig();
 
-    printf("CONFIG\t: Address is 0x%X\r\n", c->address[0]);
-    printf("CONFIG\t: Mode is %s\r\n", uwbAlgorithmName(c->mode));
-    printf("CONFIG\t: Tag mode anchor list (%i): ", c->anchorListSize);
-    for (int i = 0; i < c->anchorListSize; i++) {
-        printf("0x%02X ", c->anchors[i]);
-    }
-    printf("\r\n");
-    printf("CONFIG\t: Anchor position enabled: %s\r\n",
-           c->positionEnabled ? "true" : "false");
-    if (c->positionEnabled) {
-        printf("CONFIG\t: Anchor position: %f %f %f\r\n",
-               c->position[0], c->position[1], c->position[2]);
-    }
-    printf("CONFIG\t: SmartPower: %s  ForceTxPower: %s\r\n",
-           c->smartPower ? "True" : "False",
-           c->forceTxPower ? "True" : "False");
-    if (c->forceTxPower) {
-        printf("CONFIG\t: TX power setting: %08X\r\n", (unsigned int)c->txPower);
-    }
-    printf("CONFIG\t: Bitrate: %s  Preamble: %s\r\n",
-           c->lowBitrate ? "low" : "normal",
-           c->longPreamble ? "long" : "normal");
-}
+//     printf("CONFIG\t: Address is 0x%X\r\n", c->address[0]);
+//     printf("CONFIG\t: Mode is %s\r\n", uwbAlgorithmName(c->mode));
+//     printf("CONFIG\t: Tag mode anchor list (%i): ", c->anchorListSize);
+//     for (int i = 0; i < c->anchorListSize; i++) {
+//         printf("0x%02X ", c->anchors[i]);
+//     }
+//     printf("\r\n");
+//     printf("CONFIG\t: Anchor position enabled: %s\r\n",
+//            c->positionEnabled ? "true" : "false");
+//     if (c->positionEnabled) {
+//         printf("CONFIG\t: Anchor position: %f %f %f\r\n",
+//                c->position[0], c->position[1], c->position[2]);
+//     }
+//     printf("CONFIG\t: SmartPower: %s  ForceTxPower: %s\r\n",
+//            c->smartPower ? "True" : "False",
+//            c->forceTxPower ? "True" : "False");
+//     if (c->forceTxPower) {
+//         printf("CONFIG\t: TX power setting: %08X\r\n", (unsigned int)c->txPower);
+//     }
+//     printf("CONFIG\t: Bitrate: %s  Preamble: %s\r\n",
+//            c->lowBitrate ? "low" : "normal",
+//            c->longPreamble ? "long" : "normal");
+// }
 
 /* ------------------------------------------------------------------ */
 
@@ -144,16 +145,17 @@ void app_main(void)
     TickType_t lastStatus = xTaskGetTickCount() - pdMS_TO_TICKS(STATUS_PERIOD_MS);
 
     while (1) {
-        #if PIN_LED_WS2812
+        #ifdef PIN_LED_WS2812
         ledTick();
         #endif
 
-        #if PIN_BUTTON
+        #ifdef PIN_BUTTON
         handleButton();
         #endif
 
-        // if ((xTaskGetTickCount() - lastStatus) >= pdMS_TO_TICKS(STATUS_PERIOD_MS)) {
-        //     lastStatus = xTaskGetTickCount();
+        if ((xTaskGetTickCount() - lastStatus) >= pdMS_TO_TICKS(STATUS_PERIOD_MS)) {
+            lastStatus = xTaskGetTickCount();
+            // printf("ping\r\n");
         //     printf("\r\n====================\r\n");
         //     printf("SYSTEM\t: LPS node firmware\r\n");
         //     if (uwbOk) {
@@ -162,7 +164,7 @@ void app_main(void)
         //     } else {
         //         printf("TEST\t: UWB self-test FAILED: %s\r\n", uwbStrError());
         //     }
-        // }
+        }
 
         vTaskDelay(pdMS_TO_TICKS(1));
     }
