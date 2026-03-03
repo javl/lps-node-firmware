@@ -52,6 +52,7 @@ extern uwbAlgorithm_t uwbSnifferAlgorithm;
 extern uwbAlgorithm_t uwbTdoaAlgorithm;
 extern uwbAlgorithm_t uwbTdoa2Algorithm;
 extern uwbAlgorithm_t uwbTdoa3Algorithm;
+extern uwbAlgorithm_t uwbTdoa2TagAlgorithm;
 static uwbAlgorithm_t *algorithm = &dummyAlgorithm;
 
 /* Forward declaration — defined later in this file */
@@ -66,6 +67,7 @@ struct {
   {.algorithm = &uwbSnifferAlgorithm,   .name = "Sniffer"},
   {.algorithm = &uwbTdoa2Algorithm,     .name = "TDoA Anchor V2"},
   {.algorithm = &uwbTdoa3Algorithm,     .name = "TDoA Anchor V3"},
+  {.algorithm = &uwbTdoa2TagAlgorithm,  .name = "TDoA Tag V2"},
   {NULL, NULL},
 };
 

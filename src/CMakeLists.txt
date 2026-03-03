@@ -18,6 +18,7 @@ idf_component_register(
         "uwb_twr_tag.c"
         "uwb_tdoa_anchor2.c"
         "uwb_tdoa_anchor3.c"
+        "uwb_tdoa_tag.c"
         "uwb_sniffer.c"
         # libdw3000 shim + Qorvo decadriver
         "../lib/libdw3000/src/libdw3000_shim.c"

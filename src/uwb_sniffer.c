@@ -63,10 +63,15 @@ static uint32_t twrAnchorOnEvent(dwDevice_t *dev, uwbEvent_t event)
       write(STDOUT_FILENO, rxPacket.payload, dataLength);
       write(STDOUT_FILENO, &dataLength, 2);  // Length repeated for sync detection
     } else {
-      printf("From %02x to %02x @%02x%08x: ", rxPacket.sourceAddress[0],
+      printf("\nFrom %02x to %02x @%02x%08x: ", rxPacket.sourceAddress[0],
                                             rxPacket.destAddress[0],
                                             (unsigned int) arrival.high8,
                                             (unsigned int) arrival.low32);
+      // float x, y, z;
+      // memcpy(&x, &rxPacket.payload[0], sizeof(float));
+      // memcpy(&y, &rxPacket.payload[4], sizeof(float));
+      // memcpy(&z, &rxPacket.payload[8], sizeof(float));
+      // printf("x=%.2f y=%.2f z=%.2f ", x, y, z);
       for (int i=0; i<(dataLength - MAC802154_HEADER_LENGTH); i++) {
         printf("%02x", rxPacket.payload[i]);
       }
