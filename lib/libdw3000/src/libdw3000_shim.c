@@ -137,8 +137,23 @@ void dwGetRawReceiveTimestamp(dwDevice_t *dev, dwTime_t *t)
 
 void dwGetSystemTimestamp(dwDevice_t *dev, dwTime_t *t)
 {
-    (void)dev;
-    dwt_readsystime(t->raw);
+    // (void)dev;
+    uint8_t sys_time[4];
+        dwt_readsystime(sys_time); // Reads 32 bits (the top 32 of the 40-bit clock)
+
+    /* DW3000 SYS_TIME register (0x1C) contains the 32 most significant bits
+     * of the 40-bit system time (bits 39:8). To match the 1-tick resolution
+     * of RX/TX timestamps, we must shift this value left by 8 bits.
+     */
+    // Reconstruct the 32 bits into a 64-bit integer
+    uint64_t top32 = 0;
+    top32 |= (uint64_t)sys_time[0];
+    top32 |= (uint64_t)sys_time[1] << 8;
+    top32 |= (uint64_t)sys_time[2] << 16;
+    top32 |= (uint64_t)sys_time[3] << 24;
+
+    // Shift left by 8 to align with the 40-bit RX/TX timestamps
+    t->full = (top32 << 8) & 0xFFFFFFFFFFULL;
 }
 
 void dwCorrectTimestamp(dwDevice_t *dev, dwTime_t *t)
@@ -222,7 +237,8 @@ void dwStartTransmit(dwDevice_t *dev)
 {
     uint8_t mode = dev->useScheduled ? DWT_START_TX_DELAYED
                                      : DWT_START_TX_IMMEDIATE;
-    if (dev->wait4resp) {
+    bool wantResp = dev->wait4resp;
+    if (wantResp) {
         mode |= DWT_RESPONSE_EXPECTED;
     }
 
@@ -233,7 +249,7 @@ void dwStartTransmit(dwDevice_t *dev)
         /* Delayed TX missed its window; attempt immediate fallback.
          * The algorithm will handle any resulting timing error.          */
         dwt_starttx(DWT_START_TX_IMMEDIATE |
-                    (dev->wait4resp ? DWT_RESPONSE_EXPECTED : 0));
+                    (wantResp ? DWT_RESPONSE_EXPECTED : 0));
     }
 }
 

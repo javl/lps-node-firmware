@@ -10,7 +10,7 @@
  *
  * Per-frame data collected for each anchor i (0..N_ANCHORS-1):
  *   rx_time        — tag-local DW3000 RX timestamp (40-bit, ~15.65 ps/tick)
- *   anchor_tx_time — anchor's own TX timestamp copied from the packet (low 32 bits)
+ *   anchor_tx_time — anchor's own TX timestamp copied from the packet (40-bit)
  *   pos[3]         — anchor position in metres, from LPP_SHORT_ANCHOR_POSITION
  *
  * TDOA between anchors i and j (for the PC solver):
@@ -44,7 +44,8 @@
 #define PACKET_TYPE_TDOA2  0x22
 #define NSLOTS             4   /* frame slots; must equal anchor NSLOTS */
 #define N_ANCHORS          3   /* active anchors (IDs 0..N_ANCHORS-1)   */
-#define TS_TX_SIZE         4   /* bytes per timestamp in rangePacket_t   */
+#define TS_TX_SIZE         5   /* bytes per timestamp in rangePacket_t   */
+#define MASK_40BIT         0xFFFFFFFFFFULL
 
 typedef struct {
     uint8_t  type;
@@ -52,12 +53,6 @@ typedef struct {
     uint8_t  timestamps[NSLOTS][TS_TX_SIZE];
     uint16_t distances[NSLOTS];
 } __attribute__((packed)) rangePacket_t;
-
-/* DW3000 physical constants */
-#ifndef TDOA_TAG_OFFLOAD
-static const double CLOCK_FREQ_HZ  = 499.2e6 * 128.0; /* ticks per second */
-static const double SPEED_OF_LIGHT = 299792458.0;       /* metres per second */
-#endif
 
 /* Offsets of optional LPP block that follows rangePacket_t */
 #define LPP_HEADER_OFF  (sizeof(rangePacket_t))
@@ -70,7 +65,9 @@ static const double SPEED_OF_LIGHT = 299792458.0;       /* metres per second */
 typedef struct {
     bool     valid;
     uint64_t rx_time;         /* tag's local DW3000 clock (40-bit ticks) */
-    uint32_t anchor_tx_time;  /* anchor's TX timestamp, low 32 bits      */
+    uint64_t anchor_tx_time;  /* anchor's own TX timestamp (anchor clock, 40-bit) */
+    uint64_t anchor_rx_ref;   /* anchor's RX of anchor 0 (anchor clock, 40-bit).
+                                 For anchor 0 itself this equals anchor_tx_time. */
     float    pos[3];          /* anchor position x,y,z in metres         */
 } anchor_obs_t;
 
@@ -125,112 +122,196 @@ static void emit_measurements(void)
 
     /* One line per frame; columns per anchor separated by tabs:
      *   TDOA <id> <rx_time> <anchor_tx_time> <x> <y> <z>  [repeated] */
-    printf("TDOA");
     for (int i = 0; i < N_ANCHORS; i++) {
-        if (!obs[i].valid || !anchor_pos_known[i]) continue;
-        printf("\t%d %llu %lu %.4f %.4f %.4f",
+        if (!obs[i].valid || !anchor_pos_known[i]) {
+            printf("B TDOA\t%d invalid\r\n", i);
+            continue;
+        }
+        printf("\t%d %llu %llu %llu %.4f %.4f %.4f",
                i,
                (unsigned long long)obs[i].rx_time,
-               (unsigned long)obs[i].anchor_tx_time,
+               (unsigned long long)obs[i].anchor_tx_time,
+               (unsigned long long)obs[i].anchor_rx_ref,
                anchor_pos[i][0], anchor_pos[i][1], anchor_pos[i][2]);
     }
     printf("\r\n");
 }
 
 #else  /* TDOA_TAG_OFFLOAD == 0 — on-device Chan-Ho 2D solver */
+/* DW3000 physical constants */
+/**
+ * @brief DW1000 UWB chip clock frequency in Hz
+ *
+ * This value is derived from the DW1000's internal clock specifications:
+ * - Base frequency: 499.2 MHz (the fundamental crystal oscillator frequency)
+ * - Multiplier: 128 (the internal PLL multiplier used for timestamp counter)
+ *
+ * This gives a timestamp tick rate of approximately 63.8976 GHz, which is used
+ * for high-precision time-of-flight measurements in UWB ranging and TDoA positioning.
+ * The timestamp counter increments at this rate, providing ~15.65 picosecond resolution.
+ */
+// static const double CLOCK_FREQ_HZ  = 499.2e6 * 128.0; /* ticks per second */
+// static const double SPEED_OF_LIGHT = 299792458.0;       /* metres per second */
 
+#define CLOCK_FREQ_HZ 499.2e6 * 128.0 /* ticks per second */
+#define SPEED_OF_LIGHT 299792458.0 /* metres per second */
+#define DO_CALIBRATE 1
+
+#define PRINT_LOGS 1
 static void emit_measurements(void)
 {
-    /* Require all three anchors received with known positions */
-    for (int i = 0; i < N_ANCHORS; i++) {
+    /* 1. Pre-flight checks */
+    for (int i = 0; i < 3; i++) {
         if (!obs[i].valid || !anchor_pos_known[i]) return;
     }
 
+    /* 2. Absolute Anchor Coordinates */
     double x0 = anchor_pos[0][0], y0 = anchor_pos[0][1];
     double x1 = anchor_pos[1][0], y1 = anchor_pos[1][1];
     double x2 = anchor_pos[2][0], y2 = anchor_pos[2][1];
 
-    /* TDOA in ticks (corrected for slot timing):
-     *   d_i0 = R_i - R_0  (how much farther anchor i is vs anchor 0)
-     *        = [(rx_i - rx_0) - (tx_i - tx_0)] * c / clock_freq
-     * The (int32_t) cast handles 32-bit wraparound of anchor timestamps. */
-    int64_t t10 = (int64_t)(obs[1].rx_time - obs[0].rx_time)
-                - (int64_t)(int32_t)(obs[1].anchor_tx_time - obs[0].anchor_tx_time);
-    int64_t t20 = (int64_t)(obs[2].rx_time - obs[0].rx_time)
-                - (int64_t)(int32_t)(obs[2].anchor_tx_time - obs[0].anchor_tx_time);
+    /* 3. TDOA Math (Standardized to 40-bit masking) */
+    uint64_t ta1 = (obs[1].anchor_tx_time - obs[1].anchor_rx_ref) & MASK_40BIT;
+    uint64_t ta2 = (obs[2].anchor_tx_time - obs[2].anchor_rx_ref) & MASK_40BIT;
 
-    double d_10 = (double)t10 / CLOCK_FREQ_HZ * SPEED_OF_LIGHT; /* R1-R0 [m] */
-    double d_20 = (double)t20 / CLOCK_FREQ_HZ * SPEED_OF_LIGHT; /* R2-R0 [m] */
+    int64_t drx10 = (int64_t)((obs[1].rx_time - obs[0].rx_time) & MASK_40BIT);
+    int64_t drx20 = (int64_t)((obs[2].rx_time - obs[0].rx_time) & MASK_40BIT);
 
-    double K0 = x0*x0 + y0*y0;
-    double K1 = x1*x1 + y1*y1;
-    double K2 = x2*x2 + y2*y2;
+    /* Inter-anchor distances for ToF compensation */
+    double d01_m = sqrt(pow(x1-x0, 2) + pow(y1-y0, 2));
+    double d02_m = sqrt(pow(x2-x0, 2) + pow(y2-y0, 2));
+    int64_t tof01 = (int64_t)(d01_m / SPEED_OF_LIGHT * CLOCK_FREQ_HZ); //64448000000.0);
+    int64_t tof02 = (int64_t)(d02_m / SPEED_OF_LIGHT * CLOCK_FREQ_HZ); //64448000000.0);
 
-    /* Chan-Ho linearization (Chan & Ho, IEEE T-SP 1994):
-     *
-     * From  R_i = R_0 + d_i0  and  R_i^2 = (x-xi)^2 + (y-yi)^2 :
-     *
-     *   2*(x1-x0)*x + 2*(y1-y0)*y + 2*d_10*R0 = K1 - K0 - d_10^2   (eq.1)
-     *   2*(x2-x0)*x + 2*(y2-y0)*y + 2*d_20*R0 = K2 - K0 - d_20^2   (eq.2)
-     *
-     * Rewrite as  A*[x,y]^T = b - R0*c
-     *   →  [x,y]^T = A^{-1}*b  -  R0 * A^{-1}*c   ≡   P - R0*Q        */
-    double a11 = 2.0*(x1-x0), a12 = 2.0*(y1-y0);
-    double a21 = 2.0*(x2-x0), a22 = 2.0*(y2-y0);
-    double det = a11*a22 - a12*a21;
-    if (fabs(det) < 1e-6) { printf("POS\tanchor collinear\r\n"); return; }
+    // Manually subtract the ~71m bias (approx 15264 ticks)
+    int64_t bias = 0;
+    // int64_t bias = 15264;
+    /* Ticks calculation: (Measured Delay) - (Internal Anchor Delay) - (Air Time A0->Ai) */
+    int64_t t10 = drx10 - (int64_t)ta1 - tof01 - bias;
+    int64_t t20 = drx20 - (int64_t)ta2 - tof02 - bias;
 
-    double b1 = K1 - K0 - d_10*d_10;
-    double b2 = K2 - K0 - d_20*d_20;
-    double c1 = 2.0*d_10;
-    double c2 = 2.0*d_20;
+    /* Conversion to meters: R_i - R_0 */
+    double d10 = (double)t10 * 0.00469176;
+    double d20 = (double)t20 * 0.00469176;
 
-    double inv = 1.0 / det;
-    double Px = inv * ( a22*b1 - a12*b2);
-    double Py = inv * (-a21*b1 + a11*b2);
-    double Qx = inv * ( a22*c1 - a12*c2);
-    double Qy = inv * (-a21*c1 + a11*c2);
+    #define BIAS10 74.7888
+    #define BIAS20 75.0366
 
-    /* Substitute  x = Px - R0*Qx,  y = Py - R0*Qy  into
-     *   R0^2 = (x-x0)^2 + (y-y0)^2
-     * → quadratic:  Aq*R0^2 + Bq*R0 + Cq = 0               */
-    double ax = Px - x0, ay = Py - y0;
-    double Aq = 1.0 - Qx*Qx - Qy*Qy;
-    double Bq = 2.0*(ax*Qx + ay*Qy);
-    double Cq = -(ax*ax + ay*ay);
+    #if DO_CALIBRATE == 1
+    printf("+");
+    /* --- CALIBRATION MODE --- */
+    // 1. Define your EXACT physical location during calibration
+    double true_x = 2.5, true_y = 0.7;
 
-    double x_tag, y_tag;
+    // 2. Calculate the "Geometric" TDoA (what it SHOULD be)
+    double d0_true = sqrt(pow(true_x - x0, 2) + pow(true_y - y0, 2));
+    double d1_true = sqrt(pow(true_x - x1, 2) + pow(true_y - y1, 2));
+    double d2_true = sqrt(pow(true_x - x2, 2) + pow(true_y - y2, 2));
 
-    if (fabs(Aq) < 1e-9) {
-        /* Degenerate — linear in R0 */
-        if (fabs(Bq) < 1e-9) { printf("POS\tdegenerate\r\n"); return; }
-        double R0 = -Cq / Bq;
-        if (R0 < 0) { printf("POS\tneg range\r\n"); return; }
-        x_tag = Px - R0*Qx;
-        y_tag = Py - R0*Qy;
-    } else {
-        double disc = Bq*Bq - 4.0*Aq*Cq;
-        if (disc < 0) { printf("POS\tno solution\r\n"); return; }
-        double sq  = sqrt(disc);
-        double R0a = (-Bq + sq) / (2.0*Aq);
-        double R0b = (-Bq - sq) / (2.0*Aq);
+    double expected_d10 = d1_true - d0_true;
+    double expected_d20 = d2_true - d0_true;
 
-        /* Pick positive root; if both positive take the smaller (closer) one */
-        double R0;
-        if      (R0a >= 0 && R0b <  0) R0 = R0a;
-        else if (R0b >= 0 && R0a <  0) R0 = R0b;
-        else if (R0a >= 0 && R0b >= 0) R0 = (R0a < R0b) ? R0a : R0b;
-        else { printf("POS\tboth roots neg\r\n"); return; }
+    // 3. Compare to your raw "dirty" d10 and d20 (the ones that currently say ~71m)
+    static double bias10 = 0, bias20 = 0;
+    static int cal_samples = 0;
 
-        x_tag = Px - R0*Qx;
-        y_tag = Py - R0*Qy;
+    if (cal_samples < 100) { // Collect 100 samples to average out noise
+        bias10 += (d10 - expected_d10);
+        bias20 += (d20 - expected_d20);
+        cal_samples++;
+        if (cal_samples == 100) {
+            bias10 /= 100.0;
+            bias20 /= 100.0;
+            printf("\nCALIBRATION COMPLETE!\n");
+            printf("Set BIAS10 to: %.4f\n", bias10);
+            printf("Set BIAS20 to: %.4f\n", bias20);
+        }
+        return; // Don't solve yet
+    }
+    printf("Using bias10: %.4f, bias20: %.4f\n", bias10, bias20);
+
+    // 4. Apply the calibrated bias to all future measurements
+    // d10 -= bias10;
+    // d20 -= bias20;
+    /* --- END CALIBRATION --- */
+    #endif
+
+    #ifdef BIAS10
+    d10 -= BIAS10;
+    #endif
+    #ifdef BIAS20
+    d20 -= BIAS20;
+    #endif
+
+    /* 4. Sanity Check: Range difference cannot exceed physical distance between anchors */
+    if (fabs(d10) > d01_m || fabs(d20) > d02_m) {
+        if (PRINT_LOGS) printf("POS\tWarning: TDoA outside physical bounds (d10:%.2f/%.2f)\n", d10, d01_m);
     }
 
-    printf("POS\tx=%.3f y=%.3f\r\n", x_tag, y_tag);
+    /* 5. Linearization using Local Coordinates (Shift A0 to 0,0) */
+    double x1_loc = x1 - x0; double y1_loc = y1 - y0;
+    double x2_loc = x2 - x0; double y2_loc = y2 - y0;
+
+    double K1 = x1_loc*x1_loc + y1_loc*y1_loc;
+    double K2 = x2_loc*x2_loc + y2_loc*y2_loc;
+
+    /* Solve: A * [x; y] = b - R0 * c */
+    double a11 = 2.0 * x1_loc; double a12 = 2.0 * y1_loc;
+    double a21 = 2.0 * x2_loc; double a22 = 2.0 * y2_loc;
+    double det = a11 * a22 - a12 * a21;
+
+    if (fabs(det) < 1e-6) return;
+
+    double b1 = K1 - d10 * d10;
+    double b2 = K2 - d20 * d20;
+    double c1 = 2.0 * d10;
+    double c2 = 2.0 * d20;
+
+    double inv = 1.0 / det;
+    double Px = inv * ( a22 * b1 - a12 * b2);
+    double Py = inv * (-a21 * b1 + a11 * b2);
+    double Qx = inv * ( a22 * c1 - a12 * c2);
+    double Qy = inv * (-a21 * c1 + a11 * c2);
+
+    /* Quadratic: Aq*R0^2 + Bq*R0 + Cq = 0 (Relative to A0 at 0,0) */
+    double Aq = 1.0 - Qx*Qx - Qy*Qy;
+    double Bq = 2.0 * (Px*Qx + Py*Qy);
+    double Cq = -(Px*Px + Py*Py);
+
+    double disc = Bq*Bq - 4.0*Aq*Cq;
+    // allow for a little bit of noise
+    if (disc < -0.1) { printf("POS\tNo physical intersection\n"); return; }
+    if (disc < 0) disc = 0;
+
+    double R0a = (-Bq + sqrt(disc)) / (2.0 * Aq);
+    double R0b = (-Bq - sqrt(disc)) / (2.0 * Aq);
+
+    // R0 is distance to A0. Since A0 is at (0,8),
+    // and your room is likely small, R0 should be between 0 and 20m.
+    // if (R0a > 0 && R0b > 0) R0 = (R0a < R0b) ? R0a : R0b;
+    // else if (R0a > 0) R0 = R0a;
+    // else if (R0b > 0) R0 = R0b;
+    // else { printf("POS\tNegative ranges\n"); return; }
+    double R0 = -1.0;
+    if (R0a > 0 && R0a < 100) R0 = R0a; // 100m is a safe upper bound
+    if (R0b > 0 && R0b < 100) {
+        if (R0 < 0 || R0b < R0) R0 = R0b; // Prefer the closer solution
+    }
+    else {
+        if (PRINT_LOGS){
+            printf("POS\tRange error\n");
+        }
+        return; }
+    // else { printf("POS\tNegative ranges\n"); return; }
+
+    /* 6. Result: Translate local coordinates back to global space */
+    double x_tag = (Px - R0 * Qx) + x0;
+    double y_tag = (Py - R0 * Qy) + y0;
+
+    printf("POS\t(%.3f, %.3f) | d10: %.2f d20: %.2f R0: %.2f\n", x_tag, y_tag, d10, d20, R0);
 }
 
 #endif /* TDOA_TAG_OFFLOAD */
-
 /* --------------------------------------------------------------------------
  * UWB event handler
  * -------------------------------------------------------------------------- */
@@ -267,15 +348,27 @@ static uint32_t tdoa2TagOnEvent(dwDevice_t *dev, uwbEvent_t event)
             /* Record observation for this slot */
             anchor_obs_t *o = &obs[anchor_id];
             o->valid          = true;
-            o->rx_time        = rx_time.full;
+            o->rx_time        = rx_time.full & MASK_40BIT;
+
+            /* Anchor's own TX timestamp (from timestamps[anchor_id]) */
+            o->anchor_tx_time = 0;
             memcpy(&o->anchor_tx_time, rp->timestamps[anchor_id], TS_TX_SIZE);
+            o->anchor_tx_time &= MASK_40BIT;
+
+            /* Anchor's RX of anchor 0 (from timestamps[0]).
+             * For anchor 0 itself this IS the TX time (same value).
+             * For others it is when this anchor received anchor 0. */
+            o->anchor_rx_ref = 0;
+            memcpy(&o->anchor_rx_ref, rp->timestamps[0], TS_TX_SIZE);
+            o->anchor_rx_ref &= MASK_40BIT;
+
             memcpy(o->pos, anchor_pos[anchor_id], sizeof(o->pos));
             obs_count++;
 
             /* Blink when we have a complete set */
-            if (obs_count == N_ANCHORS) {
-                ledBlink(ledRanging, true);
-            }
+            // if (obs_count == N_ANCHORS) {
+            //     ledBlink(ledRanging, true);
+            // }
         }
     }
 
@@ -298,7 +391,9 @@ static void tdoa2TagInit(uwbConfig_t *config, dwDevice_t *dev)
     memset(anchor_pos,       0, sizeof(anchor_pos));
     memset(anchor_pos_known, 0, sizeof(anchor_pos_known));
 
+    #if PIN_LED_WS2812
     ledBlink(ledMode, false);  /* continuous red = tag mode running */
+    #endif
 
     dwNewReceive(dev);
     dwSetDefaults(dev);

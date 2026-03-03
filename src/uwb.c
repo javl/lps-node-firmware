@@ -114,7 +114,9 @@ static void rxfailedcallback(dwDevice_t *dev) {
  * Calibrate against a known reference distance: increasing this value
  * increases the reported range by approximately 1 mm per tick.
  * -----------------------------------------------------------------------*/
-#define DW3000_ANT_DLY 16436U
+// #define DW3000_ANT_DLY 16436U
+// #define DW3000_ANT_DLY 16350U
+#define DW3000_ANT_DLY 16350U
 
 void uwbInit()
 {

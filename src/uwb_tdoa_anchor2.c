@@ -146,8 +146,8 @@ static struct ctx_s {
 
   // list of timestamps and ids for last frame.
   uint8_t packetIds[NSLOTS];
-  uint32_t rxTimestamps[NSLOTS];
-  uint32_t txTimestamps[NSLOTS];
+  uint64_t rxTimestamps[NSLOTS];
+  uint64_t txTimestamps[NSLOTS];
 
   uint16_t distances[NSLOTS];
 
@@ -222,16 +222,16 @@ static void handleFailedRx(dwDevice_t *dev)
   }
 }
 
-static void calculateDistance(int slot, int newId, int remotePid, uint32_t remoteTx, uint32_t remoteRx, uint32_t ts)
+static void calculateDistance(int slot, int newId, int remotePid, uint64_t remoteTx, uint64_t remoteRx, uint64_t ts)
 {
   // Check that the 2 last packets are consecutive packets and that our last packet is in beteen
   if ((ctx.packetIds[slot] == ((newId-1) & 0x0ff)) && remotePid == ctx.packetIds[ctx.anchorId]) {
-    double tround1 = remoteRx - ctx.txTimestamps[ctx.slot];
-    double treply1 = ctx.txTimestamps[ctx.anchorId] - ctx.rxTimestamps[ctx.slot];
-    double tround2 = ts - ctx.txTimestamps[ctx.anchorId];
-    double treply2 = remoteTx - remoteRx;
+    double tround1 = (double)(uint64_t)((remoteRx - ctx.txTimestamps[ctx.slot]) & 0xFFFFFFFFFFULL);
+    double treply1 = (double)(uint64_t)((ctx.txTimestamps[ctx.anchorId] - ctx.rxTimestamps[ctx.slot]) & 0xFFFFFFFFFFULL);
+    double tround2 = (double)(uint64_t)((ts - ctx.txTimestamps[ctx.anchorId]) & 0xFFFFFFFFFFULL);
+    double treply2 = (double)(uint64_t)((remoteTx - remoteRx) & 0xFFFFFFFFFFULL);
 
-    uint32_t distance = ((tround2 * tround1)-(treply1 * treply2)) / (2*(treply1 + tround2));
+    uint32_t distance = (uint32_t)(((tround2 * tround1)-(treply1 * treply2)) / (2*(treply1 + tround2)));
     ctx.distances[slot] = distance & 0xfffful;
   } else {
     ctx.distances[slot] = 0;
@@ -256,17 +256,20 @@ static void handleRxPacket(dwDevice_t *dev)
   }
   rangePacket_t * rangePacket = (rangePacket_t *)rxPacket.payload;
 
-  uint32_t remoteTx;
-  memcpy(&remoteTx, rangePacket->timestamps[ctx.slot], 4);
-  uint32_t remoteRx;
-  memcpy(&remoteRx, rangePacket->timestamps[ctx.anchorId], 4);
+  uint64_t remoteTx = 0;
+  memcpy(&remoteTx, rangePacket->timestamps[ctx.slot], TS_TX_SIZE);
+  remoteTx &= 0xFFFFFFFFFFULL;
+  uint64_t remoteRx = 0;
+  memcpy(&remoteRx, rangePacket->timestamps[ctx.anchorId], TS_TX_SIZE);
+  remoteRx &= 0xFFFFFFFFFFULL;
 
   calculateDistance(ctx.slot, rangePacket->pid[ctx.slot], rangePacket->pid[ctx.anchorId],
-                    remoteTx, remoteRx, rxTime.low32);
+                    remoteTx, remoteRx, rxTime.full & 0xFFFFFFFFFFULL);
 
   ctx.packetIds[ctx.slot] = rangePacket->pid[ctx.slot];
-  ctx.rxTimestamps[ctx.slot] = rxTime.low32;
-  memcpy(&ctx.txTimestamps[ctx.slot], &rangePacket->timestamps[ctx.slot], 4);
+  ctx.rxTimestamps[ctx.slot] = rxTime.full & 0xFFFFFFFFFFULL;
+  ctx.txTimestamps[ctx.slot] = 0;
+  memcpy(&ctx.txTimestamps[ctx.slot], rangePacket->timestamps[ctx.slot], TS_TX_SIZE);
 
   // Resync TDMA and save useful anchor 0 information
   if (ctx.slot == 0) {
@@ -364,7 +367,7 @@ static void setupTx(dwDevice_t *dev)
   #endif
   ctx.packetIds[ctx.anchorId] = ctx.pid++;
   dwTime_t txTime = transmitTimeForSlot(ctx.nextSlot);
-  ctx.txTimestamps[ctx.anchorId] = txTime.low32;
+  ctx.txTimestamps[ctx.anchorId] = txTime.full & 0xFFFFFFFFFFULL;
 
   dwSetReceiveWaitTimeout(dev, RECEIVE_SERVICE_TIMEOUT);
   dwWriteSystemConfigurationRegister(dev);
