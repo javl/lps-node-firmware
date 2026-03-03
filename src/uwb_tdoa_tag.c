@@ -303,6 +303,37 @@ static void send_osc_pos(float x, float y) {
     }
 }
 
+static void send_osc_int(int val) {
+    if (sock < 0) osc_setup_socket();
+    if (sock < 0) return;
+
+    // simplistic OSC packet construction:
+    // Address Pattern: "/int" -> 4 bytes aligned -> "/int\0\0\0\0" (8 bytes total)
+    // Type Tag String: ",i"  -> 4 bytes aligned -> ",i\0\0" (4 bytes total)
+    // Arguments: int val (4 bytes)
+    // Total: 8 + 4 + 4 = 16 bytes
+
+    uint8_t packet[16];
+    memset(packet, 0, sizeof(packet));
+
+    // Address Pattern
+    memcpy(packet, "/int", 4);
+
+    // Type Tag String
+    memcpy(packet + 8, ",i", 2);
+
+    // Arguments
+    uint32_t val_be = htonl(val);
+    memcpy(packet + 12, &val_be, 4);
+
+    int err = sendto(sock, packet, sizeof(packet), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err < 0) {
+        ESP_LOGE(TAG_OSC, "Error occurred during sending: errno %d", errno);
+        close(sock);
+        sock = -1; // Force recreate
+    }
+}
+
 /* DW3000 physical constants */
 /**
  * @brief DW1000 UWB chip clock frequency in Hz
@@ -325,6 +356,8 @@ static void send_osc_pos(float x, float y) {
 #define PRINT_LOGS 0
 static void emit_measurements(void)
 {
+    send_osc_int(2);
+
     /* 1. Pre-flight checks */
     for (int i = 0; i < 3; i++) {
         if (!obs[i].valid || !anchor_pos_known[i]) return;

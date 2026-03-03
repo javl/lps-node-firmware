@@ -31,4 +31,5 @@ idf_component_register(
         "../lib/libdw3000/decadriver"
     REQUIRES
         esp_driver_rmt
+        esp_wifi
 )
