@@ -194,10 +194,10 @@ static void emit_measurements(void)
     double d10 = (double)t10 * 0.00469176;
     double d20 = (double)t20 * 0.00469176;
 
-    #define BIAS10 74.7888
-    #define BIAS20 75.0366
+    #define BIAS10 75.1975
+    #define BIAS20 76.2128
 
-    #if DO_CALIBRATE == 1
+    #if DO_CALIBRATE == 0
     printf("+");
     /* --- CALIBRATION MODE --- */
     // 1. Define your EXACT physical location during calibration
@@ -280,31 +280,30 @@ static void emit_measurements(void)
 
     double disc = Bq*Bq - 4.0*Aq*Cq;
     // allow for a little bit of noise
-    if (disc < -0.1) { printf("POS\tNo physical intersection\n"); return; }
-    if (disc < 0) disc = 0;
+    // if (disc < -0.1) { printf("POS\tNo physical intersection\n"); return; }
+    // if (disc < 0) disc = 0;
+
+    // If noise makes the intersection impossible, "disc" goes negative.
+    // We treat it as 0 to find the point where the hyperbolas almost touch.
+    if (disc < 0) {
+        printf("POS\tLow confidence (No hard intersection, disc: %.3f)\n", disc);
+        disc = 0;
+    }
 
     double R0a = (-Bq + sqrt(disc)) / (2.0 * Aq);
     double R0b = (-Bq - sqrt(disc)) / (2.0 * Aq);
 
-    // R0 is distance to A0. Since A0 is at (0,8),
-    // and your room is likely small, R0 should be between 0 and 20m.
-    // if (R0a > 0 && R0b > 0) R0 = (R0a < R0b) ? R0a : R0b;
-    // else if (R0a > 0) R0 = R0a;
-    // else if (R0b > 0) R0 = R0b;
-    // else { printf("POS\tNegative ranges\n"); return; }
+    // For R0 (distance to A0), we only care about the positive root.
+    // In a room, R0 should usually be between 0 and 20 meters.
     double R0 = -1.0;
-    if (R0a > 0 && R0a < 100) R0 = R0a; // 100m is a safe upper bound
-    if (R0b > 0 && R0b < 100) {
-        if (R0 < 0 || R0b < R0) R0 = R0b; // Prefer the closer solution
-    }
-    else {
-        if (PRINT_LOGS){
-            printf("POS\tRange error\n");
-        }
-        return; }
-    // else { printf("POS\tNegative ranges\n"); return; }
+    if (R0a > 0) R0 = R0a;
+    if (R0b > 0 && (R0 < 0 || R0b < R0)) R0 = R0b;
 
-    /* 6. Result: Translate local coordinates back to global space */
+    if (R0 < 0) {
+        printf("POS\tError: All solutions result in negative distances.\n");
+        return;
+    }
+
     double x_tag = (Px - R0 * Qx) + x0;
     double y_tag = (Py - R0 * Qy) + y0;
 
@@ -341,6 +340,8 @@ static uint32_t tdoa2TagOnEvent(dwDevice_t *dev, uwbEvent_t event)
                 emit_measurements();
                 clear_frame();
             }
+            // printf("R\tReceived packet from anchor %d at local time %llu\r\n",
+            //        anchor_id, (unsigned long long)rx_time.full);
 
             /* Update persistent anchor position from LPP if present */
             try_extract_lpp_pos(rxPacket.payload, payload_len, anchor_id);
