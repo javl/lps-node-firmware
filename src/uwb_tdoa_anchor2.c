@@ -60,9 +60,7 @@
 
 #define DEBUG_USING_LED 0
 
-#if DEBUG_USING_LED
 #include "led.h"
-#endif
 
 #define debug(...) printf(__VA_ARGS__)
 
@@ -424,6 +422,8 @@ static void tdoa2Init(uwbConfig_t * config, dwDevice_t *dev)
   memset(ctx.rxTimestamps, 0, sizeof(ctx.rxTimestamps));
 }
 
+static bool firstSendReceived = false;
+
 // Called for each DW radio event
 static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
 {
@@ -445,7 +445,7 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
       // printf("We are NOT anchor 0\r\n");
       switch (event) {
         case eventPacketReceived: {
-          printf("received packet from anchor 0\r\n");
+          // printf("received packet from anchor 0\r\n");
           #if DEBUG_USING_LED
             ledBlink(ledRanging, true);  // DEBUG: oneshot 50ms blue flash on every TX
             #endif
@@ -469,6 +469,10 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
               setupTx(dev);
               ctx.slotState = slotRxDone;
               ctx.state = synchronizedState;
+              if (!firstSendReceived) {
+                firstSendReceived = true;
+                ledOn(ledRanging);
+              }
               updateSlot();
             } else {
               // Start the receiver waiting for a packet from anchor 0

@@ -95,21 +95,14 @@ static CfgEntry *getOrCreate(ConfigField field)
 
 /* ---- public API --------------------------------------------------------- */
 // Add fallback to prevent issues building
-#ifndef NODE_ANCHOR_X
-#  define NODE_ANCHOR_X 0
-#endif
-#ifndef NODE_ANCHOR_Y
-#  define NODE_ANCHOR_Y 0
-#endif
-#ifndef NODE_ANCHOR_Z
-#  define NODE_ANCHOR_Z 0
-#endif
 
 void cfgInit(void)
 {
     cfgWriteU8(cfgAddress,      (uint8_t)NODE_ADDRESS);
     cfgWriteU8(cfgMode,         (uint8_t)NODE_MODE);
+    #if defined(NODE_ANCHOR_X) && defined(NODE_ANCHOR_Y) && defined(NODE_ANCHOR_Z)
     cfgWriteFP32list(cfgAnchorPos, (float[]){NODE_ANCHOR_X, NODE_ANCHOR_Y, NODE_ANCHOR_Z}, 3);
+    #endif
     cfgWriteU8(cfgSmartPower,   (uint8_t)UWB_SMART_POWER);
     cfgWriteU8(cfgForceTxPower, (uint8_t)UWB_FORCE_TX_POWER);
     cfgWriteU32(cfgTxPower,     (uint32_t)UWB_TX_POWER);
@@ -119,10 +112,18 @@ void cfgInit(void)
                    (uint8_t *)default_anchor_list,
                    ANCHOR_LIST_SIZE);
 
+    #if defined(NODE_ANCHOR_X) && defined(NODE_ANCHOR_Y) && defined(NODE_ANCHOR_Z)
     printf("CONFIG\t: Loaded from build flags — "
            "addr=0x%02X mode=%d x=%f y=%f z=%f smart=%d lowBR=%d longPre=%d\r\n",
            NODE_ADDRESS, NODE_MODE, NODE_ANCHOR_X, NODE_ANCHOR_Y, NODE_ANCHOR_Z,
            UWB_SMART_POWER, UWB_LOW_BITRATE, UWB_LONG_PREAMBLE);
+    #else
+    printf("CONFIG\t: Loaded from build flags — "
+           "addr=0x%02X mode=%d smart=%d lowBR=%d longPre=%d\r\n",
+           NODE_ADDRESS, NODE_MODE, UWB_SMART_POWER,
+           UWB_LOW_BITRATE, UWB_LONG_PREAMBLE);
+    #endif
+
 }
 
 bool cfgReset(void)

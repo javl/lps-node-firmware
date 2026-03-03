@@ -129,11 +129,13 @@ void uwbInit()
    * Drive RST low, then release to high-Z so the internal pull-up controls
    * the line.  Never drive RST high from an output — it can damage the IC.
    */
+  #if PIN_DW_RST
   gpio_set_direction(PIN_DW_RST, GPIO_MODE_OUTPUT);
   gpio_set_level(PIN_DW_RST, 0);
   vTaskDelay(pdMS_TO_TICKS(1));
   gpio_set_direction(PIN_DW_RST, GPIO_MODE_INPUT);   /* release → high-Z */
   vTaskDelay(pdMS_TO_TICKS(5));                       /* PLL lock margin  */
+  #endif
 
   /* ---- 2b. SPI sanity check: verify DEV_ID before doing anything ------
    * This mirrors the checkForDevID() pattern used in DWM3000.cpp.

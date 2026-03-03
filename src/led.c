@@ -74,6 +74,7 @@ static void ws2812_update(void)
 
 void ledInit(void)
 {
+    #if PIN_LED_WS2812
     /* 1. Create RMT TX channel on the WS2812B data pin. */
     rmt_tx_channel_config_t chan_cfg = {
         .gpio_num          = PIN_LED_WS2812,
@@ -106,6 +107,7 @@ void ledInit(void)
     memset(s_blinking,   0, sizeof(s_blinking));
     memset(s_disable_at, 0, sizeof(s_disable_at));
     ws2812_update();
+    #endif
 }
 
 /* -------------------------------------------------------------------------- */

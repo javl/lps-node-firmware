@@ -98,7 +98,11 @@ void dwOpsInit(dwDevice_t *device)
 
     /* --- CS and WAKEUP as outputs; RST starts as input (high-Z) ------- */
     gpio_config_t out_cfg = {
+        #if PIN_DW_WAKEUP
         .pin_bit_mask = (1ULL << PIN_DW_CS) | (1ULL << PIN_DW_WAKEUP),
+        #else
+        .pin_bit_mask = (1ULL << PIN_DW_CS),
+        #endif
         .mode         = GPIO_MODE_OUTPUT,
         .pull_up_en   = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -106,9 +110,12 @@ void dwOpsInit(dwDevice_t *device)
     };
     gpio_config(&out_cfg);
     gpio_set_level(PIN_DW_CS,     1);   /* deassert CS (active-low) */
+    #if PIN_DW_WAKEUP
     gpio_set_level(PIN_DW_WAKEUP, 0);   /* WAKEUP idle-low           */
+    #endif
 
     /* RST released (high-Z) so the DWM3000's internal pull-up controls it. */
+    #ifdef PIN_DW_RST
     gpio_config_t rst_cfg = {
         .pin_bit_mask = (1ULL << PIN_DW_RST),
         .mode         = GPIO_MODE_INPUT,
@@ -117,6 +124,7 @@ void dwOpsInit(dwDevice_t *device)
         .intr_type    = GPIO_INTR_DISABLE,
     };
     gpio_config(&rst_cfg);
+    #endif
 
     /* --- SPI2 bus -------------------------------------------------------- */
     spi_bus_config_t bus_cfg = {
@@ -257,9 +265,11 @@ int writetospiwithcrc(uint16_t        headerLength,
  * for ≥ 500 µs; we use 1 ms to be safe.                               */
 void wakeup_device_with_io(void)
 {
+    #if PIN_DW_WAKEUP
     gpio_set_level(PIN_DW_WAKEUP, 1);
     vTaskDelay(pdMS_TO_TICKS(1));
     gpio_set_level(PIN_DW_WAKEUP, 0);
+    #endif
 
     /* Allow time for the DW3000 SPI interface to become ready (~3 ms) */
     vTaskDelay(pdMS_TO_TICKS(3));

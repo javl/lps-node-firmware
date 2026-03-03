@@ -34,26 +34,38 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#if PIN_LED_WS2812
 #include "led.h"
+#endif
+
+#ifdef PIN_BUTTON
 #include "button.h"
+#endif
+
 #include "cfg.h"
 #include "uwb.h"
 
 
 /* ------------------------------------------------------------------ */
 
+#if PIN_BUTTON
 static void handleButton(void)
 {
     ButtonEvent be = buttonGetState();
 
     if (be == buttonShortPress) {
+        #if PIN_LED_WS2812
         ledBlink(ledRanging, true);
+        #endif
     } else if (be == buttonLongPress) {
+        #if PIN_LED_WS2812
         ledBlink(ledSync, true);
+        #endif
     }
 
     buttonProcess();
 }
+#endif
 
 static void printConfig(void)
 {
@@ -87,13 +99,19 @@ static void printConfig(void)
 
 void app_main(void)
 {
+    #if PIN_LED_WS2812
     ledInit();
+    #endif
+    #ifdef PIN_BUTTON
     buttonInit(buttonIdle);
+    #endif
 
+    #if PIN_LED_WS2812
     /* Flash all LEDs during init */
     ledOn(ledRanging);
     ledOn(ledSync);
     ledOn(ledMode);
+    #endif
 
     cfgInit();
     uwbInit();
@@ -106,9 +124,11 @@ void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
+    #if PIN_LED_WS2812
     ledOff(ledRanging);
     ledOff(ledSync);
     ledOff(ledMode);
+    #endif
 
     if (uwbOk) {
         uwbStart();
@@ -124,20 +144,25 @@ void app_main(void)
     TickType_t lastStatus = xTaskGetTickCount() - pdMS_TO_TICKS(STATUS_PERIOD_MS);
 
     while (1) {
+        #if PIN_LED_WS2812
         ledTick();
-        handleButton();
+        #endif
 
-        if ((xTaskGetTickCount() - lastStatus) >= pdMS_TO_TICKS(STATUS_PERIOD_MS)) {
-            lastStatus = xTaskGetTickCount();
-            printf("\r\n====================\r\n");
-            printf("SYSTEM\t: LPS node firmware (ESP32-S3)\r\n");
-            if (uwbOk) {
-                printConfig();
-                printf("SYSTEM\t: Node running\r\n");
-            } else {
-                printf("TEST\t: UWB self-test FAILED: %s\r\n", uwbStrError());
-            }
-        }
+        #if PIN_BUTTON
+        handleButton();
+        #endif
+
+        // if ((xTaskGetTickCount() - lastStatus) >= pdMS_TO_TICKS(STATUS_PERIOD_MS)) {
+        //     lastStatus = xTaskGetTickCount();
+        //     printf("\r\n====================\r\n");
+        //     printf("SYSTEM\t: LPS node firmware\r\n");
+        //     if (uwbOk) {
+        //         printConfig();
+        //         printf("SYSTEM\t: Node running\r\n");
+        //     } else {
+        //         printf("TEST\t: UWB self-test FAILED: %s\r\n", uwbStrError());
+        //     }
+        // }
 
         vTaskDelay(pdMS_TO_TICKS(1));
     }
