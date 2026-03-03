@@ -25,16 +25,16 @@
 /* uwb_tdoa2.c: Uwb TDOA anchor, version with anchor-computed distances */
 
 /*
- * This anchor algorithm is using TDMA to divide frames in 8 timeslots. Each
+ * This anchor algorithm is using TDMA to divide frames in 3 timeslots. Each
  * anchor is sending a packet in one timeslot, anchor n sends its packet in
  * timeslot n. The slot time is of 2ms.
  *
  * Each packet contains (assuming the packet is sent by anchor n):
- *   - A list of 8 IDs that contains the sequence number of the packets
+ *   - A list of 3 IDs that contains the sequence number of the packets
  *     - At index n: The sequence number of this packet
  *     - At index != n: The sequence number of the last packet received by
  *       anchor 'index'
- *   - A list of 8 timestamps that contains
+ *   - A list of 3 timestamps that contains
  *     - At index n: The TX timestamp of the current packet in anchor n time
  *     - At index != n: The RX timestamp of all other packets from previous
  *                      frame in anchor n clock. If the previous packet was
@@ -70,9 +70,9 @@
 #define NSLOTS 4  // number of anchors, rounded up to next power of 2 (3 anchors -> 4)
 
 #if DEBUG_USING_LED
-#define TDMA_SLOT_BITS 33 // DEBUG: 33 ~262ms/slot; restore to 26 for 2ms/slot
+#define TDMA_SLOT_BITS 33 // DEBUG: 33 ~262ms/slot
 #else
-#define TDMA_SLOT_BITS 26
+#define TDMA_SLOT_BITS 26 // 26 = 2ms/slot
 #endif
 
 
@@ -101,7 +101,17 @@
 // Timeout for receiving a service packet after we TX ours
 #define RECEIVE_SERVICE_TIMEOUT 800
 
-#define TS_TX_SIZE 4
+#define TS_TX_SIZE 5
+// Number of consecutive missed slot-0 packets before forcing a full resync.
+// A single miss (e.g. anchor 0 rebooting) should not silence all other anchors.
+#define MAX_MISSED_SLOT0 5
+
+// Task-level fallback timeout (ms) used after eventPacketSent in slotTxDone.
+// If DWT_RESPONSE_EXPECTED auto-RX fires correctly, eventReceiveTimeout arrives
+// within ~800 µs and this never triggers. If it does not fire (DW3000 shim issue),
+// the task wakes after this delay and advances via eventTimeout instead.
+#define SLOT_TX_DONE_FALLBACK_MS 2
+
 
 // Useful constants
 static const uint8_t base_address[] = {0,0,0,0,0,0,0xcf,0xbc};
@@ -140,6 +150,9 @@ static struct ctx_s {
   uint32_t txTimestamps[NSLOTS];
 
   uint16_t distances[NSLOTS];
+
+  // Counter for consecutive missed slot-0 receptions (used to debounce resync)
+  int missedSlot0Count;
 } ctx;
 
 // Packet formats
@@ -157,13 +170,22 @@ typedef struct rangePacket_s {
 #define LPP_PAYLOAD (sizeof(rangePacket_t)+2)
 
 /* Adjust time for schedule transfer by DW1000 radio. Set 9 LSB to 0 */
-static uint32_t adjustTxRxTime(dwTime_t *time)
-{
-  uint32_t added = (1<<9) - (time->low32 & ((1<<9)-1));
+// static uint32_t adjustTxRxTime(dwTime_t *time)
+// {
+//   uint32_t added = (1<<9) - (time->low32 & ((1<<9)-1));
+//   time->low32 = (time->low32 & ~((1<<9)-1)) + (1<<9);
+//   return added;
+// }
 
-  time->low32 = (time->low32 & ~((1<<9)-1)) + (1<<9);
-
-  return added;
+/* DWM3000 version: No 9-bit alignment needed.
+   Just ensure the time is a valid future timestamp. */
+static uint32_t adjustTxRxTime(dwTime_t *time) {
+  // DWM3000 only ignores bit 0.
+  // We can just ensure the low32 is even if we want to be precise,
+  // but basically, the 'added' jump is now 0.
+  // uint32_t original = time->low32;
+  // time->low32 &= ~0x01; // Ensure bit 0 is 0
+  return 0;
 }
 
 /* Calculate the transmit time for a given timeslot in the current frame */
@@ -189,10 +211,14 @@ static void handleFailedRx(dwDevice_t *dev)
   ctx.rxTimestamps[ctx.slot] = 0;
   ctx.distances[ctx.slot] = 0;
 
-  // Failed TDMA sync, keeps track of the number of fail so that the TDMA
-  // watchdog can take decision as of TDMA resynchronisation
+  // Only force a full resync after several consecutive missed slot-0 packets.
+  // A single miss (e.g. anchor 0 rebooting briefly) should not silence this anchor.
   if (ctx.slot == 0) {
-    ctx.state = syncTdmaState;
+    ctx.missedSlot0Count++;
+    if (ctx.missedSlot0Count >= MAX_MISSED_SLOT0) {
+      ctx.state = syncTdmaState;
+      ctx.missedSlot0Count = 0;
+    }
   }
 }
 
@@ -244,6 +270,8 @@ static void handleRxPacket(dwDevice_t *dev)
 
   // Resync TDMA and save useful anchor 0 information
   if (ctx.slot == 0) {
+    ctx.missedSlot0Count = 0;
+
     // Resync local frame start to packet from anchor 0
     dwTime_t pkTxTime = { .full = 0 };
     memcpy(&pkTxTime, rangePacket->timestamps[ctx.slot], TS_TX_SIZE);
@@ -393,7 +421,7 @@ static uint32_t slotStep(dwDevice_t *dev, uwbEvent_t event)
     case slotTxDone:
     // We try to receive an LPP packet after sending our packet.
     // After this is done, we setup the next receive.
-      if (event == eventPacketReceived || event == eventReceiveTimeout) {
+      if (event == eventPacketReceived || event == eventReceiveTimeout || event == eventTimeout) {
         if (event == eventPacketReceived) {
           debug("Received service packet!\r\n");
           handleServicePacket(dev);
@@ -404,6 +432,12 @@ static uint32_t slotStep(dwDevice_t *dev, uwbEvent_t event)
         setupRx(dev);
         ctx.slotState = slotRxDone;
         updateSlot();
+      } else if (event == eventPacketSent) {
+        // TX done; wait for the hardware post-TX RX window to expire.
+        // If DWT_RESPONSE_EXPECTED auto-RX fires, eventReceiveTimeout will
+        // arrive and advance state. Return a short fallback timeout so the
+        // task can still advance via eventTimeout if the hardware does not.
+        return SLOT_TX_DONE_FALLBACK_MS;
       }
       break;
   }
@@ -418,6 +452,7 @@ static void tdoa2Init(uwbConfig_t * config, dwDevice_t *dev)
   ctx.state = syncTdmaState;
   ctx.slot = NSLOTS-1;
   ctx.nextSlot = 0;
+  ctx.missedSlot0Count = 0;
   memset(ctx.txTimestamps, 0, sizeof(ctx.txTimestamps));
   memset(ctx.rxTimestamps, 0, sizeof(ctx.rxTimestamps));
 }
@@ -428,10 +463,8 @@ static bool firstSendReceived = false;
 static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
 {
   if (ctx.state == synchronizedState) {
-    // printf("return slotStep\r\n");
     return slotStep(dev, event);
   } else {
-    // printf("Check anchor id\r\n");
     if (ctx.anchorId == 0) {
       // printf("We are anchor 0\r\n");
       dwGetSystemTimestamp(dev, &ctx.tdmaFrameStart);
@@ -442,7 +475,6 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
       ctx.slotState = slotTxDone;
       updateSlot();
     } else {
-      // printf("We are NOT anchor 0\r\n");
       switch (event) {
         case eventPacketReceived: {
           // printf("received packet from anchor 0\r\n");
@@ -456,6 +488,7 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
             int dataLength = dwGetDataLength(dev);
             dwGetData(dev, (uint8_t*)&rxPacket, dataLength);
 
+            // If packet is from anchor 0 and of the right type
             if (rxPacket.sourceAddress[0] == 0 && rxPacket.payload[0] == PACKET_TYPE_TDOA2) {
               rangePacket_t * rangePacket = (rangePacket_t *)rxPacket.payload;
 
@@ -476,7 +509,7 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
               updateSlot();
             } else {
               // Start the receiver waiting for a packet from anchor 0
-              // printf("start waiting for packet from anchor 0\r\n");
+              // printf("message was from 0x%02X, something else, wait for anchor 0\r\n", rxPacket.sourceAddress[0]);
               dwIdle(dev);
               dwSetReceiveWaitTimeout(dev, RECEIVE_SYNC_TIMEOUT);
               dwWriteSystemConfigurationRegister(dev);
@@ -489,7 +522,7 @@ static uint32_t tdoa2UwbEvent(dwDevice_t *dev, uwbEvent_t event)
           break;
         default:
           // Start the receiver waiting for a packet from anchor 0
-          // printf("we are waiting for packet from anchor 0\r\n");
+          // printf("received event %d, wait for anchor 0\r\n", event);
           dwIdle(dev);
           dwSetReceiveWaitTimeout(dev, RECEIVE_SYNC_TIMEOUT);
           dwWriteSystemConfigurationRegister(dev);
