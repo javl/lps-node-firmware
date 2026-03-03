@@ -176,14 +176,20 @@ static void event_handler(void* arg, esp_event_base_t event_base,
         if (s_retry_num < ESP_MAXIMUM_RETRY) {
             esp_wifi_connect();
             s_retry_num++;
+            #if PRINT_LOGS == 1
             ESP_LOGI(TAG_OSC, "retry to connect to the AP");
+            #endif
         } else {
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         }
+        #if PRINT_LOGS == 1
         ESP_LOGI(TAG_OSC,"connect to the AP fail");
+        #endif
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        #if PRINT_LOGS == 1
         ESP_LOGI(TAG_OSC, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        #endif
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
@@ -232,7 +238,9 @@ static void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
     ESP_ERROR_CHECK(esp_wifi_start() );
 
+    #if PRINT_LOGS == 1
     ESP_LOGI(TAG_OSC, "wifi_init_sta finished.");
+    #endif
 
     // Note: We don't block here because it delays startup too much if AP is missing.
     // The send loop will just fail until connected.
@@ -252,11 +260,15 @@ static void osc_setup_socket(void) {
 
     sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (sock < 0) {
+        #if PRINT_LOGS == 1
         ESP_LOGE(TAG_OSC, "Unable to create socket: errno %d", errno);
+        #endif
         sock = -1;
         return;
     }
+    #if PRINT_LOGS == 1
     ESP_LOGI(TAG_OSC, "Socket created, sending to %s:%d", OSC_SERVER_IP, OSC_SERVER_PORT);
+    #endif
 }
 
 // Helper to swap float to big endian (network byte order)
@@ -270,6 +282,10 @@ static uint32_t float_to_big_endian(float value) {
 }
 
 static void send_osc_pos(float x, float y) {
+    if (!s_wifi_event_group || !(xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT)) {
+        return;
+    }
+
     if (sock < 0) osc_setup_socket();
     if (sock < 0) return;
 
@@ -297,13 +313,19 @@ static void send_osc_pos(float x, float y) {
 
     int err = sendto(sock, packet, sizeof(packet), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
     if (err < 0) {
+        #if PRINT_LOGS == 1
         ESP_LOGE(TAG_OSC, "Error occurred during sending: errno %d", errno);
+        #endif
         close(sock);
         sock = -1; // Force recreate
     }
 }
 
 static void send_osc_int(int val) {
+    if (!s_wifi_event_group || !(xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT)) {
+        return;
+    }
+
     if (sock < 0) osc_setup_socket();
     if (sock < 0) return;
 
@@ -328,7 +350,9 @@ static void send_osc_int(int val) {
 
     int err = sendto(sock, packet, sizeof(packet), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
     if (err < 0) {
+        #if PRINT_LOGS == 1
         ESP_LOGE(TAG_OSC, "Error occurred during sending: errno %d", errno);
+        #endif
         close(sock);
         sock = -1; // Force recreate
     }
@@ -354,9 +378,11 @@ static void send_osc_int(int val) {
 #define DO_CALIBRATE 1
 
 #define PRINT_LOGS 0
+
+static TickType_t last_emit_time = 0;
+
 static void emit_measurements(void)
 {
-    send_osc_int(2);
 
     /* 1. Pre-flight checks */
     for (int i = 0; i < 3; i++) {
@@ -443,7 +469,7 @@ static void emit_measurements(void)
 
     /* 4. Sanity Check: Range difference cannot exceed physical distance between anchors */
     if (fabs(d10) > d01_m || fabs(d20) > d02_m) {
-        if (PRINT_LOGS) printf("POS\tWarning: TDoA outside physical bounds (d10:%.2f/%.2f)\n", d10, d01_m);
+        if (PRINT_LOGS == 1) printf("POS\tWarning: TDoA outside physical bounds (d10:%.2f/%.2f)\n", d10, d01_m);
     }
 
     /* 5. Linearization using Local Coordinates (Shift A0 to 0,0) */
@@ -484,7 +510,7 @@ static void emit_measurements(void)
     // If noise makes the intersection impossible, "disc" goes negative.
     // We treat it as 0 to find the point where the hyperbolas almost touch.
     if (disc < 0) {
-        if (PRINT_LOGS) printf("POS\tLow confidence (No hard intersection, disc: %.3f)\n", disc);
+        if (PRINT_LOGS == 1) printf("POS\tLow confidence (No hard intersection, disc: %.3f)\n", disc);
         disc = 0;
     }
 
@@ -498,15 +524,23 @@ static void emit_measurements(void)
     if (R0b > 0 && (R0 < 0 || R0b < R0)) R0 = R0b;
 
     if (R0 < 0) {
-        if (PRINT_LOGS) printf("POS\tError: All solutions result in negative distances.\n");
+        if (PRINT_LOGS == 1) printf("POS\tError: All solutions result in negative distances.\n");
         return;
     }
 
     double x_tag = (Px - R0 * Qx) + x0;
     double y_tag = (Py - R0 * Qy) + y0;
-    send_osc_pos((float)x_tag, (float)y_tag);
 
-    if (PRINT_LOGS) printf("POS\t(%.3f, %.3f) | d10: %.2f d20: %.2f R0: %.2f\n", x_tag, y_tag, d10, d20, R0);
+    TickType_t now = xTaskGetTickCount();
+    printf("Time passed: %d ms\n", (int)pdTICKS_TO_MS(now - last_emit_time));
+    if ((now - last_emit_time) > pdTICKS_TO_MS(1000/10)) { // Limit to 10 Hz updates
+        send_osc_pos((float)x_tag, (float)y_tag);
+        printf("sent");
+        last_emit_time = now;
+    }
+
+
+    if (PRINT_LOGS == 1) printf("POS\t(%.3f, %.3f) | d10: %.2f d20: %.2f R0: %.2f\n", x_tag, y_tag, d10, d20, R0);
 }
 
 #endif /* TDOA_TAG_OFFLOAD */
